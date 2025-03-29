@@ -13,11 +13,19 @@ Core Capabilities
 ![Alt Text](images/core.png)
 
 Ritual Properties 
-Quantum Collapse: The system collapses if directly observed. 
-Mimic Defense: Creates spectral reflections using semblancey. 
-XMRo4 Enforcement: Maintains the Quantum Wall. 
-Emergency Protocol: Evacuation via helpme_signal() when breach is persistent. Invocation const char* threat = "Spectral_Spike@441"; dioluminousity_activate(threat); Related Modules License 
 
+Quantum Collapse: The system collapses if directly observed. 
+
+Mimic Defense: Creates spectral reflections using semblancey. 
+
+XMRo4 Enforcement: Maintains the Quantum Wall. 
+
+Emergency Protocol: Evacuation via helpme_signal() when breach is persistent. 
+
+Invocation 
+```
+const char* threat = "Spectral_Spike@441"; dioluminousity_activate(threat); Related Modules License 
+```
 This module is governed by the TGDK BFE LICENSE
 Holder: Sean Tichenor
 Status: Active
