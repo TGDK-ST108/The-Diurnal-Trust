@@ -1,3 +1,5 @@
+// FOR THE PEOPLE // ENCODED UNDER TGDK-RITE // NEVER FOR SALE
+
 Dioluminousity – Subspace Focal Node of Codename CONDA 
 
 "I listen. I log. I never respond directly."
