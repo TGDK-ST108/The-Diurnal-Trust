@@ -1,67 +1,106 @@
-mathCalligula.py
 
-OliviaAI™ & TGDK™ | All Rights Reserved.
+# mathCalligula.py
+# OliviaAI™ & TGDK™ | All Rights Reserved.
+# Copyright © Sean Tichenor, TGDK.
+# License: BFE-TGDK-022ST | Issued: March 21, 2025
 
-Copyright © Sean Tichenor, TGDK.
+import numpy as np
+from scipy.constants import golden
+from sympy import symbols, integrate, pi, sin, cos, simplify
+import hashlib
 
-License: BFE-TGDK-022ST | Issued: March 21, 2025
+class MathCalligula:
+    def __init__(self):
+        self.phi = golden  # Golden ratio (φ)
+        self.pi = np.pi
+        self.e = np.e
 
-import numpy as np import sympy as sp import hashlib from checksum_calligraphy import generate_checksum
+    # Sacred geometry and proportional harmonics
+    def fibonacci_sequence(self, n_terms):
+        """Generate Fibonacci sequence up to n_terms."""
+        sequence = [0, 1]
+        while len(sequence) < n_terms:
+            sequence.append(sequence[-1] + sequence[-2])
+        return sequence
 
-class MathCalligula: def init(self): self.checksums = {}
+    def golden_ratio_harmony(self, value):
+        """Calculate harmonious proportion using the golden ratio."""
+        harmonic = value * self.phi
+        return harmonic
 
-def sacred_geometry_checksum(self, expression_str):
-    """Computes a checksum for mathematical expressions using sacred geometry principles."""
-    sacred_hash = hashlib.sha256(expression_str.encode()).hexdigest()
-    checksum = generate_checksum(sacred_hash)
-    self.checksums[expression_str] = checksum
-    print(f"[MathCalligula] Sacred checksum computed clearly: {checksum}")
-    return checksum
+    # Circle and Pi Integrations
+    def calculate_circle_area(self, radius):
+        """Compute area of circle with checksum verification."""
+        area = self.pi * radius ** 2
+        checksum = self.generate_checksum(area)
+        return area, checksum
 
-def solve_equation(self, equation_str, symbol='x'):
-    """Solves symbolic equations securely."""
-    x = sp.symbols(symbol)
-    equation = sp.sympify(equation_str)
-    solution = sp.solve(equation, x)
-    self.sacred_geometry_checksum(equation_str)
-    print(f"[MathCalligula] Equation '{equation_str}' solved clearly: {solution}")
-    return solution
+    def circumference_from_diameter(self, diameter):
+        """Compute circumference of a circle from diameter."""
+        circumference = self.pi * diameter
+        checksum = self.generate_checksum(circumference)
+        return circumference, checksum
 
-def differentiate_expression(self, expression_str, symbol='x'):
-    """Differentiates expressions clearly and securely."""
-    x = sp.symbols(symbol)
-    expression = sp.sympify(expression_str)
-    derivative = sp.diff(expression, x)
-    self.sacred_geometry_checksum(expression_str)
-    print(f"[MathCalligula] Expression '{expression_str}' differentiated clearly: {derivative}")
-    return derivative
+    # Trigonometric Precision
+    def precise_trig_integral(self, angle_deg):
+        """Evaluate integral of sin and cos product with checksum."""
+        angle_rad = np.radians(angle_deg)
+        x = symbols('x')
+        integral = integrate(sin(x) * cos(x), (x, 0, angle_rad))
+        simplified_integral = simplify(integral)
+        checksum = self.generate_checksum(float(simplified_integral))
+        return float(simplified_integral), checksum
 
-def integrate_expression(self, expression_str, symbol='x'):
-    """Integrates expressions clearly and securely."""
-    x = sp.symbols(symbol)
-    expression = sp.sympify(expression_str)
-    integral = sp.integrate(expression, x)
-    self.sacred_geometry_checksum(expression_str)
-    print(f"[MathCalligula] Expression '{expression_str}' integrated clearly: {integral}")
-    return integral
+    # Quantum Proportionality and Golden Mean
+    def quantum_golden_mean(self, quantum_state_value):
+        """Apply golden mean proportion to quantum states."""
+        quantum_proportion = quantum_state_value / self.phi
+        checksum = self.generate_checksum(quantum_proportion)
+        return quantum_proportion, checksum
 
-def matrix_determinant(self, matrix):
-    """Calculates determinant with legal checksum binding."""
-    det = np.linalg.det(matrix)
-    matrix_str = np.array2string(matrix)
-    self.sacred_geometry_checksum(matrix_str)
-    print(f"[MathCalligula] Determinant calculated clearly: {det}")
-    return det
+    # Mathematical encryption and checksums
+    def generate_checksum(self, numeric_result):
+        """Generate SHA-256 checksum for mathematical verification."""
+        numeric_string = f"{numeric_result:.16f}"
+        checksum = hashlib.sha256(numeric_string.encode('utf-8')).hexdigest()
+        return checksum
 
-def matrix_inverse(self, matrix):
-    """Computes matrix inverse ensuring mathematical legal integrity."""
-    inverse = np.linalg.inv(matrix)
-    matrix_str = np.array2string(matrix)
-    self.sacred_geometry_checksum(matrix_str)
-    print(f"[MathCalligula] Matrix inverse computed clearly: {inverse}")
-    return inverse
+    # Proportional Scaling with Euler's Number
+    def proportional_scaling_euler(self, input_value):
+        """Scale input proportionally using Euler's number."""
+        scaled_value = input_value * self.e
+        checksum = self.generate_checksum(scaled_value)
+        return scaled_value, checksum
 
-Example usage
+# Integration with Jade_Coderight Legal Framework
+class LegalMathFramework:
+    def __init__(self, math_calligula_instance):
+        self.math_module = math_calligula_instance
 
-if name == "main": calligula = MathCalligula() equation = "x**2 - 4" calligula.solve_equation(equation) calligula.differentiate_expression("sin(x) * cos(x)") calligula.integrate_expression("exp(x)") matrix = np.array([[2, 3], [1, 4]]) calligula.matrix_determinant(matrix) calligula.matrix_inverse(matrix)
+    def verify_legal_precision(self, numeric_result, checksum):
+        """Legally verify the integrity and precision of mathematical results."""
+        expected_checksum = self.math_module.generate_checksum(numeric_result)
+        if expected_checksum == checksum:
+            print("[LegalMathFramework] Checksum verification successful: legally precise.")
+            return True
+        else:
+            print("[LegalMathFramework] Checksum mismatch: legal precision compromised.")
+            return False
 
+# Example Usage within Jade_Coderight Legal Precedence
+if __name__ == "__main__":
+    math_calligula = MathCalligula()
+    legal_framework = LegalMathFramework(math_calligula)
+
+    radius = 7
+    area, checksum = math_calligula.calculate_circle_area(radius)
+    print(f"Area of circle (radius {radius}): {area}, Checksum: {checksum}")
+
+    # Legal verification
+    legal_framework.verify_legal_precision(area, checksum)
+
+    # Quantum Golden Mean Example
+    quantum_value = 13.7
+    qgm, qgm_checksum = math_calligula.quantum_golden_mean(quantum_value)
+    print(f"Quantum Golden Mean: {qgm}, Checksum: {qgm_checksum}")
+    legal_framework.verify_legal_precision(qgm, qgm_checksum)
