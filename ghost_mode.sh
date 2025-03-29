@@ -1,3 +1,5 @@
+// FOR THE PEOPLE // ENCODED UNDER TGDK-RITE // NEVER FOR SALE
+
 #!/bin/bash
 
 # ======================================================
