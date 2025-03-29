@@ -112,6 +112,7 @@ It activates in response to breach detection, mimetic interference, or inversion
 
 It does not attack—it reflects, reverses, and remembers.
 
+Components
 ![Alt Text](images/key.png)
 
 Components Invocation Logic 
