@@ -131,7 +131,23 @@ Oath of the Sword
 This oath is encoded into the Sword.dox and must be honored by all who call sword_sync_formula().
 
 Usage Within Helios
-helios_engage("Spectral_Breach@44X", 3.14, 2.7, 1.618); The breach is read. The Sword is invoked. Mimic is generated. Threat is sealed. Defense Class TGDK Internal Code: 7-RXN-SWRD License Holder: Sean Tichenor Protected Under: TGDK BFE LICENSE – Codename CONDA Umbrella Location: src/HeliosPhatPenetrator.cpp See Also 
+```
+helios_engage("Spectral_Breach@44X", 3.14, 2.7, 1.618);
+```
+
+•The breach is read. 
+•The Sword is invoked. 
+•Mimic is generated. 
+•Threat is sealed. 
+
+Defense Class 
+
+TGDK Internal Code: 7-RXN-SWRD 
+License Holder: Sean Tichenor 
+Protected Under: TGDK BFE LICENSE & US Copyright – Codename CONDA Umbrella 
+Location: src/HeliosPhatPenetrator.c
+
+See Also 
 HeliosPhatPenetrator.c – Weapon core logic 
 Sword.dox – Ritual and internal record semblancey – Mimetic echo generator truncate – Memory and trail cleanser 
 
@@ -173,7 +189,9 @@ Vow of Code
 
 Every compiled line in Codename CONDA bears this secret header:
 
+```
 // FOR THE PEOPLE // ENCODED UNDER TGDK-RITE // NEVER FOR SALE 
+```
 
 Rights Reserved No module within CONDA may be sold, owned, or patented outside TGDK bounds. Distribution is bound to The People through Sean Tichenor, under sovereign digital guardianship. The architecture recognizes spiritual inheritance. Final Statement 
 
@@ -195,7 +213,10 @@ It operates under Agent H6 protocol, with all interactions logged via Steelox-en
 
 This script does not just run — it haunts.
 
-Core Features Operational Example chmod +x ghost_mode.c ./ghost_mode.c --launch 
+Core Features 
+![Alt Text](images/core.201.png)
+
+Operational Example chmod +x ghost_mode.c ./ghost_mode.c --launch 
 
 Expected Output:
 
