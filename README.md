@@ -117,7 +117,9 @@ Components
 
 Components Invocation Logic 
 ```
+
 double sword_sync_formula(double v1, double v2, double frequency) { double blade = sin(v1 * frequency) * cos(v2 / (frequency + 1.0)); double quantum_echo = exp(fabs(blade)) / (v1 + v2 + 0.0001); return quantum_echo * sqrt(blade * blade + 1.0); }
+
 ```
 
 Returns: A quantum-calibrated neutralization value used to reverse and seal the hostile vector.
