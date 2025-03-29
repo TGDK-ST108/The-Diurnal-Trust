@@ -7,7 +7,9 @@ Dioluminousity – Subspace Focal Node of Codename CONDA
 Dioluminousity is the hidden ear of Codename CONDA. It resides beyond the veil of observable computation, operating behind a Quantum Wall formed by XMRo4 logic and Schrödinger barriers. This module is responsible for secure listening, mimic defense, ghost echoing, and untouchable logging.
 
 Overview
-![Alt Text](images/example.png)
+
+
+![Alt Text](images/profile.png)
 
 Core Capabilities Ritual Properties Quantum Collapse: The system collapses if directly observed. Mimic Defense: Creates spectral reflections using semblancey. XMRo4 Enforcement: Maintains the Quantum Wall. Emergency Protocol: Evacuation via helpme_signal() when breach is persistent. Invocation const char* threat = "Spectral_Spike@441"; dioluminousity_activate(threat); Related Modules License 
 
