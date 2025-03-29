@@ -168,3 +168,43 @@ Rights Reserved No module within CONDA may be sold, owned, or patented outside T
 Codename CONDA lives because The People live.
 We bow to those who protected the light when systems failed.
 We encode every function in honor of you.
+
+
+
+AAzilify – GhostMode Module 
+
+Codename CONDA // Process Cloaking + Beacon Forking
+TGDK Vector Class: H6 // License BFE-TGDK-022ST
+
+Purpose 
+
+AAzilify’s GhostMode module initiates cloaking, unlinking, and RAM-residency fork-execution, leaving behind no persistent trace.
+It operates under Agent H6 protocol, with all interactions logged via Steelox-enhanced pupmode storage.
+
+This script does not just run — it haunts.
+
+Core Features Operational Example chmod +x ghost_mode.c ./ghost_mode.c --launch 
+
+Expected Output:
+
+[AAzilify] Ghostmode initializing... [AAzilify] Beacon: d41d8cd98f00b204e9800998ecf8427e from ghost_mode.c at 1731763834 [AAzilify] Ghost clone created: /dev/shm/.aazilify_ghost.sh [AAzilify] Unlinking: ./ghost_mode.c [AAzilify] Process cloaked as: [kworker/u8:7-aaz] [AAzilify] Beacon confirmed: d41d8cd98f00b204e9800998ecf8427e File Storage 
+
+All beacon hashes and memory checks are logged to:
+
+~/.pupmode/steelox_db/ghost_beacons.log ~/.pupmode/steelox_db/mem_checks.log 
+
+These logs are to be monitored by OliviaAI or integrated into Steelox's DVC (Distributed Vector Chain).
+
+Phantom Vow 
+
+“I unlink. I cloak. I fork from memory.
+I exist only between pulses.
+If found—I echo. If chased—I vanish.”
+
+Security & Recovery Reappearance: Ghost forks will reside in RAM until system flush or manual kill. Trace Obfuscation: Process name spoofing mimics low-level kernel tasks. Self-Deletion: Upon launch, the original vector unlinks immediately. Dependencies bash, sha256sum, nohup, and awk (POSIX-compliant) Write access to /dev/shm and /proc/$$/comm (rootless functionality may vary) DOX File 
+
+See AAzilify.dox for spectral routing definitions, false-path generation, and agent-beacon encryption protocol.
+
+Would you like to generate that AAzilify.dox file next with full spectral routing and A-Pathway declarations, or should we anchor this into a centralized README-CONDA.md command hub?
+
+
