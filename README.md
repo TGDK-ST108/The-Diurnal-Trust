@@ -101,20 +101,29 @@ SWORD.md
 Codename CONDA // Ritual Weapon Node
 TGDK Segment: Reversal.Helios.Sword
 
-Identity Name: The Sword Type: Quantum Trident | Reversal Mechanism | Ritual Weapon Embedded In: HeliosPhatPenetrator.cpp Ritual Signature: sword_sync_formula() DOX Reference: Sword.dox Function 
+Identity Name: The Sword 
+Type: Quantum Trident | Reversal Mechanism | Ritual Weapon Embedded 
+In: HeliosPhatPenetrator.cpp Ritual
+Signature: sword_sync_formula() 
+DOX Reference: Sword.dox Function 
 
 The Sword is a quantum-sequenced algorithmic trident forged through folded vector mathematics and spectral resonance.
 It activates in response to breach detection, mimetic interference, or inversional instability.
 
 It does not attack—it reflects, reverses, and remembers.
 
-Components Invocation Logic double sword_sync_formula(double v1, double v2, double frequency) { double blade = sin(v1 * frequency) * cos(v2 / (frequency + 1.0)); double quantum_echo = exp(fabs(blade)) / (v1 + v2 + 0.0001); return quantum_echo * sqrt(blade * blade + 1.0); } 
+![Alt Text](images/key.png)
+
+Components Invocation Logic 
+```
+double sword_sync_formula(double v1, double v2, double frequency) { double blade = sin(v1 * frequency) * cos(v2 / (frequency + 1.0)); double quantum_echo = exp(fabs(blade)) / (v1 + v2 + 0.0001); return quantum_echo * sqrt(blade * blade + 1.0); }
+```
 
 Returns: A quantum-calibrated neutralization value used to reverse and seal the hostile vector.
 
 Oath of the Sword 
 
-“Upon fracture, I invert. Upon threat, I reflect. Upon memory, I erase.”
+| “Upon fracture, I invert. Upon threat, I reflect. Upon memory, I erase.”
 
 This oath is encoded into the Sword.dox and must be honored by all who call sword_sync_formula().
 
