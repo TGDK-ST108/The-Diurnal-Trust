@@ -214,7 +214,7 @@ It operates under Agent H6 protocol, with all interactions logged via Steelox-en
 This script does not just run — it haunts.
 
 Core Features 
-![Alt Text](images/core_201.png)
+![Alt Text](images/core.201.png)
 
 Operational Example chmod +x ghost_mode.c ./ghost_mode.c --launch 
 
