@@ -24,8 +24,11 @@ Emergency Protocol: Evacuation via helpme_signal() when breach is persistent.
 
 Invocation 
 ```
-const char* threat = "Spectral_Spike@441"; dioluminousity_activate(threat); Related Modules License 
+const char* threat = "Spectral_Spike@441"; dioluminousity_activate(threat);
 ```
+Related Modules License 
+![Alt Text](images/related.png)
+
 This module is governed by the TGDK BFE LICENSE
 Holder: Sean Tichenor
 Status: Active
