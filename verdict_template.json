@@ -1,0 +1,12 @@
+{
+  "verdict_template": {
+    "Court": "Vector Court",
+    "Date": "{{ auto_now }}",
+    "Subject": "{{ subject_name }}",
+    "Alignment": "{{ alignment_status }}",
+    "Vector": "{{ trajectory_vector }}",
+    "Magnitude": "{{ magnitude_level }}",
+    "Verdict": "{{ final_judgment }}",
+    "Notes": "{{ supplemental_oracle }}"
+  }
+}
