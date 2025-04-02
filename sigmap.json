@@ -1,0 +1,14 @@
+{
+  "module": "Enzo",
+  "tier": "PRIVATE",
+  "quantum_hash": "7db38bc...QQUAp",
+  "dual_key": "OMEGA-X9",
+  "registry": "USTAF-ADL",
+  "linked_to": [
+    "AAzilify",
+    "smirf",
+    "Trinity",
+    "Codename CONDA",
+    "Pyramid Kernel Gateway"
+  ]
+}
