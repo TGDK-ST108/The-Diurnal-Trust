@@ -47,6 +47,24 @@
 #include <string.h>
 #include <math.h>
 #include "trinity.h"
+#include "USTAF_ADL_Tokenizer.h"
+#include "PKG.cpp"
+
+void Trinity::invoke_matrix(const std::string& matrix_id, const std::string& auth_token, const std::string& key) {
+    std::cout << "[Trinity] Initiating matrix: " << matrix_id << std::endl;
+    if (!auth_token.empty()) {
+        USTAF_ADL_Tokenizer tokenizer;
+        tokenizer.register_token(auth_token, PRIVATE, 600, key);
+        PyramidKernelGateway pkg(tokenizer);
+        if (!pkg.authorize(auth_token, key)) {
+            std::cout << "[Trinity] Access denied at PKG level for matrix: " << matrix_id << std::endl;
+            return;
+        }
+        pkg.enforce_seal();
+    }
+    std::cout << "[Trinity] Matrix " << matrix_id << " is active.\n";
+}
+
 
 // XOR-based encryption (295AQVP standard)
 void trinity_encrypt_data(const unsigned char* data, size_t data_len, 
