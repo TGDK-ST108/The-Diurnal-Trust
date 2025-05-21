@@ -43,8 +43,25 @@ local function tetrafi_adaptive(data)
     end
 end
 
--- Run Test
-local entropy = io.open("/dev/urandom", "rb"):read(128)
+-- TETRAFI :: Adaptive Post-Quantum Accelerator Loop
+
+local ffi = require("ffi")
+local jit = require("jit")
+
 print("[TETRAFI] :: Adaptive Mode Active")
-print("[TETRAFI] :: Architecture:", arch)
-print("[TETRAFI] :: Output:", tetrafi_adaptive(entropy))
+print("[TETRAFI] :: Architecture:     " .. jit.arch)
+
+-- Mockup entropy-based computation for demonstration
+local counter = 0
+local function generate_vector()
+    counter = counter + 1
+    local entropy = math.random(0, 65535)
+    return string.format("JIT_ACCEL::%08X", bit.bxor(entropy, counter * 13))
+end
+
+-- Loop mode
+while true do
+    local vector = generate_vector()
+    print("[TETRAFI] :: Output:    " .. vector)
+    os.execute("sleep 1") -- Adjust timing as needed
+end
