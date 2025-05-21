@@ -1,6 +1,7 @@
 -- TETRADEN :: Post-Quantum Lua Accelerator [BFE Edition]
 -- Format: LuaJIT for Termux
 
+local unpack = table.unpack
 local ffi = require("ffi")
 local bit = require("bit")
 
@@ -42,7 +43,7 @@ function duoplex_interplex(str)
         local m = bit.bxor((c * (i % 17 + 3)) % 256, (255 - i) % 256)
         table.insert(mix, m)
     end
-    return sha256_hex(string.char(table.unpack(mix)))
+    return sha256_hex(string.char(unpack(mix)))
 end
 
 -- Layer III: BFE-Quantum Output Cycler
