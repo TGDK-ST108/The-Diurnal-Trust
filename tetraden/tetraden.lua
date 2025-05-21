@@ -1,14 +1,14 @@
 -- TETRADEN :: Post-Quantum Lua Accelerator [BFE Edition]
 -- Format: LuaJIT for Termux
 
-local unpack = table.unpack
-local ffi = require("ffi")
 local bit = require("bit")
 
+local ffi = require("ffi")
 ffi.cdef[[
     void SHA256(const void *d, size_t n, unsigned char *md);
 ]]
 
+-- Native SHA-256 hashing via OpenSSL
 local function sha256_hex(input)
     local hash = ffi.new("unsigned char[32]")
     ffi.C.SHA256(input, #input, hash)
@@ -35,7 +35,7 @@ function wave_lattice_mod(entropy)
     return table.concat(mod)
 end
 
--- Duoplex Interplex Hashing
+-- Duoplex Interplex Hashing Layer
 function duoplex_interplex(str)
     local mix = {}
     for i = 1, #str do
