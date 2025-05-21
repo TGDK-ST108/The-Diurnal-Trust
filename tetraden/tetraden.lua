@@ -1,9 +1,9 @@
 -- TETRADEN :: Post-Quantum Lua Accelerator [BFE Edition]
--- Format: Lua (LuaJIT for Termux runtime)
+-- Format: LuaJIT for Termux
 
 local ffi = require("ffi")
+local bit = require("bit")
 
--- OpenSSL SHA256 via FFI
 ffi.cdef[[
     void SHA256(const void *d, size_t n, unsigned char *md);
 ]]
@@ -19,7 +19,7 @@ end
 -- Layer I: Entropy Wave Sampler
 function wave_entropy()
     local f = io.open("/dev/urandom", "rb")
-    local entropy = f:read(128) -- High-variance sampling
+    local entropy = f:read(128)
     f:close()
     return entropy
 end
@@ -34,12 +34,13 @@ function wave_lattice_mod(entropy)
     return table.concat(mod)
 end
 
--- Duoplex Interplex Hashing (Telemetry Mix)
+-- Duoplex Interplex Hashing
 function duoplex_interplex(str)
     local mix = {}
     for i = 1, #str do
         local c = str:byte(i)
-        table.insert(mix, ((c * (i % 17 + 3)) ~ (255 - i)) % 256)
+        local m = bit.bxor((c * (i % 17 + 3)) % 256, (255 - i) % 256)
+        table.insert(mix, m)
     end
     return sha256_hex(string.char(table.unpack(mix)))
 end
