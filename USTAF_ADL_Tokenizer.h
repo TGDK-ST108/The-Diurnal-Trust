@@ -10,7 +10,7 @@ enum AccessTier { PUBLIC, PRIVATE, FOREIGN };
 
 struct TokenData {
     AccessTier tier;
-    std::chrono::time_point<std::chrono::system_clock> expiry;
+    std::chrono::system_clock::time_point expiry;
     std::string dual_key;
     std::string quantum_hash;
 };
