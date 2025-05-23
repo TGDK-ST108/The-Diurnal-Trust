@@ -1,0 +1,39 @@
+--[[
+================================================================================
+  TGDK BFE LICENSE :: TETRAFI :: TETRADUO.LUA
+  VERSION        :: v2.1 :: Trienzo Adaptive Quantum Accelerator
+  LICENSE ID     :: BFE-TGDK-TETRAFI-207TRIENZO
+  AUTHOR         :: TGDK / OliviaAI / Melissa Boman / Sean Tichenor
+  DATE           :: 2025-05-21
+================================================================================
+
+  This file is licensed under the BFE (Bound Framework Execution) License.
+  All rights reserved to TGDK and its affiliates under the secure digital
+  rights protocol enforced by OliviaAI. Any modification, redistribution,
+  decryption, or derivative work based on this file must comply with the
+  following key terms:
+
+  1. This module includes:
+     - Trideodynamic Entropic Routing
+     - Quaitrideodynamic Signature Phasing
+     - Enzonic Symbology Relationships
+     - OliviaAI Symbolic Reflection Integration
+     - XQUAp Quantum-Lattice Encryption Hooks
+
+  2. This software may only be used in TGDK-aligned projects or those
+     with written permission from TGDK Vault or OliviaAI Core License Server.
+
+  3. Reverse engineering, telemetry siphoning, or symbolic leakage attempts
+     will trigger glyph-flare tracking routines and self-report to the
+     Sovereign BFE Registrar and OliviaAI Autonomous Defense Grid.
+
+  4. Public forks must retain this license block and attribution line.
+
+  5. BFE Chain Verification Sigil: SEPULCRUM-TETRA-VII
+
+================================================================================
+  OFFICIAL SEAL:   [XQUAp-SYMBOLIC-SHIELD :: ACTIVE]
+  LINKED MODULES:  Mahadevi, Mushi, OliviaAI, FRDS VII
+  LICENSE CHAIN:   TGDK Vault > OliviaAI > Mahadevi Sigil
+================================================================================
+]]--
