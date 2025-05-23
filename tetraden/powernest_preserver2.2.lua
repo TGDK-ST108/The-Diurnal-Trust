@@ -7,11 +7,53 @@ local math = require("math")
 local bit = require("bit")
 math.randomseed(os.time())
 
--- === Termux Battery Snapshot (Informational Tap) ===
-local handle = io.popen("termux-battery-status")
-local result = handle:read("*a")
-handle:close()
-print("[PowerNest] :: Telemetry Snapshot:\n" .. result)
+local running = true
+
+-- Handle Ctrl+C
+local function shutdown()
+    print("\n[PowerNest] :: Shutdown signal received. Exiting gracefully...")
+    os.exit()
+end
+
+-- Wrap in protected call
+local status, err = pcall(function()
+    print("[PowerNest] :: INFQQUAp Telemetry Loop Active :: Ctrl+C to exit")
+
+    while running do
+        adjust_charge()
+        print("[PowerNest] :: Cycle complete. Sleeping 60s...\n")
+        os.execute("sleep 60")
+    end
+end)
+
+if not status then shutdown() end
+
+-- === Termux Fallback ===
+local function read_termux_telemetry()
+    local handle = io.popen("termux-battery-status")
+    if not handle then return nil end
+    local json = handle:read("*a")
+    handle:close()
+
+    local cap = json:match('"percentage"%s*:%s*(%d+)')
+    local temp = json:match('"temperature"%s*:%s*(%d+)')
+    local volt = json:match('"current"%s*:%s*(-?%d+)')
+
+    return tonumber(cap), tonumber(temp), tonumber(volt or 0)
+end
+
+-- === Smart Read ===
+local function smart_read_param(param)
+    local value = read_param(param)
+    if not value then
+        print("[PowerNest] :: [WARN] Falling back to termux-battery-status...")
+        local cap, temp, volt = read_termux_telemetry()
+        if param == "capacity" then return cap
+        elseif param == "temp" then return temp
+        elseif param == "voltage_now" then return volt end
+    end
+    return value
+end
 
 -- === Battery SysFS Path ===
 local battery = "/sys/class/power_supply/battery/"
@@ -71,9 +113,9 @@ end
 
 -- === Charging Logic ===
 local function adjust_charge()
-    local capacity = read_param("capacity")
-    local temp = read_param("temp")
-    local voltage = read_param("voltage_now")
+    local capacity = smart_read_param("capacity")
+    local temp = smart_read_param("temp")
+    local voltage = smart_read_param("voltage_now")
 
     if not (capacity and temp and voltage) then
         print("[PowerNest] :: [FATAL] Missing telemetry. Skipping cycle.")
