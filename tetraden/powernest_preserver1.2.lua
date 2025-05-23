@@ -56,6 +56,18 @@ local function read_param(param)
     return tonumber(value)
 end
 
+local function read_param(param)
+    local file = io.open("/sys/class/power_supply/battery/" .. param, "r")
+    if not file then return nil end
+    local val = file:read("*all")
+    file:close()
+    return val:match("%d+")
+end
+
+local capacity = read_param("capacity")
+local temp = read_param("temp")
+print("Battery: " .. capacity .. "%, Temp: " .. (tonumber(temp) or 0)/10 .. "°C")
+
 -- === Main Adaptive Charging Logic ===
 local function adjust_charge()
     local capacity = read_param("capacity") or 0
