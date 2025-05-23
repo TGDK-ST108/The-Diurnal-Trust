@@ -61,13 +61,24 @@ local function read_param(param)
     return tonumber(value)
 end
 
+
+if not capacity then
+    print("[PowerNest] :: ERROR: Battery capacity could not be read.")
+    return
+end
+
 local function read_param(param)
-    local file = io.open("/sys/class/power_supply/battery/" .. param, "r")
-    if not file then return nil end
+    local path = battery .. param
+    local file = io.open(path, "r")
+    if not file then
+        print("[PowerNest] :: [ERROR] Cannot read: " .. path)
+        return nil
+    end
     local val = file:read("*all")
     file:close()
-    return val:match("%d+")
+    return tonumber(val)
 end
+
 
 local capacity = read_param("capacity")
 local temp = read_param("temp")
