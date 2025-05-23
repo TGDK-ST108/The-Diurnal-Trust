@@ -3,6 +3,11 @@
 -- BFE License ID: BFE-TGDK-POWERNEST-INFQQUAP
 -- Protected via SEPULCRUM-SEAL-VII :: XQUAp Cascade Authorized
 
+
+local handle = io.popen("termux-battery-status")
+local result = handle:read("*a")
+handle:close()
+print(result)
 local battery = "/sys/class/power_supply/battery/"
 local math = require("math")
 math.randomseed(os.time())
