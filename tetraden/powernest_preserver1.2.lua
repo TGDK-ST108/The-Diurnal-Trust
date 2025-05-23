@@ -19,7 +19,7 @@ end
 
 -- === QQUAp Cascade Offload (Mock Simulation) ===
 local function qquap_offload(matrix_val)
-    local cascade = bit32.bxor(matrix_val, 0xAA55) % 104729
+    local cascade = bit.bxor(matrix_val, 0xAA55) % 104729
     return string.format("QQUAp::%05X", cascade)
 end
 
