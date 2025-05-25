@@ -93,7 +93,7 @@ def run_monitor():
         clear()
         print(f"{COLOR_CYAN}== TDT SYSTEM MONITOR :: Veyrunis Unit =={COLOR_RESET}")
 
-        cpu = psutil.cpu_percent(interval=0.2) / 100
+        cpu = get_cpu_percent_fallback()
         mem = psutil.virtual_memory().percent / 100
         battery = psutil.sensors_battery()
         uptime = timedelta(seconds=int(time.time() - psutil.boot_time()))
