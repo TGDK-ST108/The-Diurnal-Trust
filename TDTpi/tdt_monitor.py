@@ -6,7 +6,6 @@ import shutil
 import psutil
 from datetime import timedelta
 
-# ANSI Color Codes
 COLOR_RESET = "\033[0m"
 COLOR_GREEN = "\033[92m"
 COLOR_YELLOW = "\033[93m"
@@ -51,18 +50,18 @@ def get_cpu_percent_fallback():
     try:
         with open("/proc/stat", "r") as f:
             cpu_line = f.readline()
-            fields = [float(column) for column in cpu_line.strip().split()[1:]]
-            idle1, total1 = fields[3], sum(fields)
+        fields = [float(x) for x in cpu_line.strip().split()[1:]]
+        idle1, total1 = fields[3], sum(fields)
         time.sleep(0.2)
         with open("/proc/stat", "r") as f:
             cpu_line = f.readline()
-            fields = [float(column) for column in cpu_line.strip().split()[1:]]
-            idle2, total2 = fields[3], sum(fields)
+        fields = [float(x) for x in cpu_line.strip().split()[1:]]
+        idle2, total2 = fields[3], sum(fields)
         idle_delta = idle2 - idle1
         total_delta = total2 - total1
-        return (1.0 - idle_delta / total_delta)
+        return max(0.0, 1.0 - idle_delta / total_delta)
     except:
-        return 0.0
+        return 0.0  # fallback if even /proc/stat is blocked
 
 def get_temperature():
     try:
