@@ -1,11 +1,12 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# TGDK :: OVERMASK FIREWALL v1.0
-# BFE-TGDK-OVERMASK-001 :: Non-Root DNS Blocker + MAC Scan + DNS Trap
+# TGDK :: OVERMASK FIREWALL v1.1
+# BFE-TGDK-OVERMASK-001 :: Trideotaxis DNS Blocker + MAC Monitor + OliviaAI Sync
 
 BLOCKLIST="$HOME/.overmask/overmask.block"
 HOSTSFILE="$HOME/.overmask/hosts.override"
 REALHOSTS="/data/data/com.termux/files/usr/etc/hosts"
 LOGFILE="$HOME/.overmask/overmask.log"
+TRIFILE="$HOME/.overmask/overmask.trideotaxis"
 DNS_SERVER="127.0.0.1"
 
 mkdir -p "$HOME/.overmask"
@@ -14,8 +15,20 @@ function log_event() {
   echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOGFILE"
 }
 
+function phi_dex_fold() {
+  domain=$1
+  sum=0
+  for (( i=0; i<${#domain}; i++ )); do
+    c=$(printf "%d" "'${domain:$i:1}")
+    sum=$((sum + c))
+  done
+  phi=$((sum % 5))
+  dex=$(( (sum * phi + 3) % 6 ))
+  echo "Φ${phi}-Δ${dex}"
+}
+
 function init_blocklist() {
-  log_event "Initializing Overmask blocklist..."
+  log_event "Initializing Overmask blocklist with Trideotaxis codes..."
   cat > "$BLOCKLIST" <<EOF
 facebook.com
 instagram.com
@@ -25,7 +38,12 @@ ads.google.com
 api.segment.io
 graph.facebook.com
 EOF
-  log_event "Blocklist initialized."
+  > "$TRIFILE"
+  while read domain; do
+    code=$(phi_dex_fold "$domain")
+    echo "$domain :: $code" >> "$TRIFILE"
+  done < "$BLOCKLIST"
+  log_event "Trideotaxis entropy analysis complete."
 }
 
 function generate_hosts_override() {
@@ -35,20 +53,24 @@ function generate_hosts_override() {
     echo "127.0.0.1 $domain" >> "$HOSTSFILE"
     echo "::1 $domain" >> "$HOSTSFILE"
   done < "$BLOCKLIST"
-  log_event "Hosts override generated."
 }
 
 function apply_hosts() {
   log_event "Applying hosts override..."
   cp "$HOSTSFILE" "$REALHOSTS"
-  log_event "Overmask firewall is ACTIVE. Domains rerouted to 127.0.0.1."
+  log_event "Overmask firewall ACTIVE. DNS rerouted."
 }
 
 function update_blocklist_olivia() {
   log_event "Querying OliviaAI for dynamic threat list..."
   OLIVIA_URL="https://olivia-tgdk.com/api/firewall/blocklist"
   curl -s "$OLIVIA_URL" > "$BLOCKLIST"
-  log_event "Blocklist synced from OliviaAI."
+  log_event "Blocklist synced. Recalculating entropy..."
+  > "$TRIFILE"
+  while read domain; do
+    code=$(phi_dex_fold "$domain")
+    echo "$domain :: $code" >> "$TRIFILE"
+  done < "$BLOCKLIST"
   generate_hosts_override
   apply_hosts
 }
@@ -65,7 +87,7 @@ function check_mac_behavior() {
 }
 
 function overmask_loop() {
-  log_event "Overmask Guardian Loop Started."
+  log_event "Overmask Guardian Loop Initiated :: Trideotaxis Enabled"
   while true; do
     watch_dns
     check_mac_behavior
@@ -75,9 +97,9 @@ function overmask_loop() {
 
 function show_help() {
   echo "Usage: ./overmask_firewall.sh [--init | --loop | --update]"
-  echo "  --init    :: Initialize and apply local firewall"
-  echo "  --loop    :: Run MAC/DNS guardian loop"
-  echo "  --update  :: Pull blocklist from OliviaAI"
+  echo "  --init    :: Initialize and apply firewall with Trideotaxis"
+  echo "  --loop    :: Run Overmask scan loop"
+  echo "  --update  :: Sync blocklist and re-fold entropy codes"
 }
 
 case "$1" in
