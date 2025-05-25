@@ -82,9 +82,8 @@ def check_alerts(cpu, mem, battery):
         alerts.append("[ALERT] CPU usage exceeds 90%")
     if mem > 0.9:
         alerts.append("[ALERT] Memory usage exceeds 90%")
-    if battery and battery.percent < 20 and not battery.power_plugged:
+    if battery and battery["percent"] < 20 and not battery["plugged"]:
         alerts.append("[ALERT] Battery critically low")
-    return alerts
 
 def get_battery_status():
     try:
