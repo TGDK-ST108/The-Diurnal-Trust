@@ -47,6 +47,23 @@ def net_speed(interface="wlan0"):
     tx = io2.bytes_sent - io1.bytes_sent
     return rx, tx
 
+def get_cpu_percent_fallback():
+    try:
+        with open("/proc/stat", "r") as f:
+            cpu_line = f.readline()
+            fields = [float(column) for column in cpu_line.strip().split()[1:]]
+            idle1, total1 = fields[3], sum(fields)
+        time.sleep(0.2)
+        with open("/proc/stat", "r") as f:
+            cpu_line = f.readline()
+            fields = [float(column) for column in cpu_line.strip().split()[1:]]
+            idle2, total2 = fields[3], sum(fields)
+        idle_delta = idle2 - idle1
+        total_delta = total2 - total1
+        return (1.0 - idle_delta / total_delta)
+    except:
+        return 0.0
+
 def get_temperature():
     try:
         temps = psutil.sensors_temperatures()
