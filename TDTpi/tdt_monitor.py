@@ -86,6 +86,20 @@ def check_alerts(cpu, mem, battery):
         alerts.append("[ALERT] Battery critically low")
     return alerts
 
+def get_battery_status():
+    try:
+        raw = os.popen("termux-battery-status").read()
+        import json
+        data = json.loads(raw)
+        return {
+            "percent": data.get("percentage", 0),
+            "plugged": data.get("status", "").upper() == "CHARGING"
+        }
+    except:
+        return None
+
+battery = get_battery_status()
+
 def run_monitor():
     term_width = shutil.get_terminal_size().columns
     while True:
@@ -94,7 +108,6 @@ def run_monitor():
 
         cpu = get_cpu_percent_fallback()
         mem = psutil.virtual_memory().percent / 100
-        battery = psutil.sensors_battery()
         uptime = timedelta(seconds=int(time.time() - psutil.boot_time()))
         rx, tx = net_speed()
         temperature = get_temperature()
