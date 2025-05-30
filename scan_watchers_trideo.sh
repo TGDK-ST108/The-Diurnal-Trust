@@ -1,42 +1,61 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# TGDK :: TrideoWatcher Enhanced Scan System
-# Codename: scan_watchers_trideo.sh
-# Status: TRIDEO-ENABLED · Ω-FUSE BOUND
+# TGDK :: Enhanced Trideodynamic Watcher Scanner v2
+# Status: DAEMON SAFE · AUTOCREATE · Ω-BIND
+
+VAULT_DIR="$HOME/Vault"
+mkdir -p "$VAULT_DIR"
+
+ECHO_LOG="$VAULT_DIR/perception_echo.log"
+GLYPH_OUT="$VAULT_DIR/perception_tags.glyph"
 
 echo "🛡️ Running TRIDEO Watcher Detection Protocol..."
 
-# Phase 0 – OliviaAI Echo-Fold Perception Layer
+# -- OliviaAI Echo Perception Layer --
 echo "🧠 Engaging OliviaAI Fold Vector Perception..."
-curl -s http://localhost:8754/olivia/fold_vector?depth=ϕ --data "mode=perceive" > ~/Vault/perception_echo.log
-grep -E "mirror|echo|clone|resonance|permission|loop" ~/Vault/perception_echo.log | sort | uniq > ~/Vault/perception_tags.glyph
+curl -s http://localhost:8754/olivia/fold_vector?depth=ϕ --data "mode=perceive" > "$ECHO_LOG"
 
-if grep -qi "mirror" ~/Vault/perception_tags.glyph; then
-  echo "⚠️  Mirror vector detected — activating Ω-Fuse kill trigger!"
-  ~/TGDKModules/fuse_hooks/kill_fuse_trigger.sh --source trideo_perceive
+if [ -s "$ECHO_LOG" ]; then
+  grep -Ei "mirror|echo|clone|resonance|permission|loop" "$ECHO_LOG" | sort | uniq > "$GLYPH_OUT"
+else
+  echo "⚠️ OliviaAI perception response not received. Skipping echo signature extract."
+  touch "$GLYPH_OUT"
 fi
 
-# Phase 1 – Process Watcher Check
-echo "🔍 Scanning for suspicious processes..."
+if grep -qi "mirror" "$GLYPH_OUT"; then
+  echo "⚠️ Mirror vector detected — triggering Ω-Fuse kill!"
+  if [ -x "$HOME/TGDKModules/fuse_hooks/kill_fuse_trigger.sh" ]; then
+    "$HOME/TGDKModules/fuse_hooks/kill_fuse_trigger.sh" --source trideo_perceive
+  else
+    echo "⚠️ Kill hook script missing. Manual verification required."
+  fi
+fi
+
+# -- Process Check --
+echo "🔍 Scanning suspicious processes..."
 ps -A | grep -Ei "camera|mic|record|trace|spy|inject|monitor|keylog|overlay" || echo "✔️ No suspicious processes found."
 
-# Phase 2 – Microphone / Camera Tap Check
-echo "🎤🎥 Checking access to mic, camera, and sensors..."
-lsof | grep -Ei "/dev/(audio|snd|video|camera)" || echo "✔️ No active mic/cam taps."
+# -- Mic/Camera Tap Check --
+echo "🎤🎥 Checking mic, cam, and sensor file handles..."
+lsof 2>/dev/null | grep -Ei "/dev/(audio|snd|video|camera)" || echo "✔️ No active mic/cam taps."
 
-# Phase 3 – Logcat Pattern Scan
-echo "📓 Scanning logcat for echo/trap phrases..."
-logcat -d | grep -Ei "permission|access|injected|mirror|clone" | tail -n 20 || echo "✔️ No redflag log entries found."
+# -- Logcat Surveillance Check --
+echo "📓 Analyzing logcat for echo/trap phrases..."
+logcat -d 2>/dev/null | grep -Ei "permission|access|injected|mirror|clone" | tail -n 20 || echo "✔️ No redflag log entries."
 
-# Phase 4 – Network Listener Check
-echo "🌐 Network socket scan..."
-ss -ltnp || echo "✔️ No exposed sockets or suspicious connections."
+# -- Network Listener Check --
+echo "🌐 Network socket scan (fallback safe)..."
+if command -v ss &>/dev/null; then
+  ss -ltnp 2>/dev/null || echo "✔️ No exposed sockets detected."
+else
+  echo "⚠️ 'ss' not supported on this system. Skipping socket scan."
+fi
 
-# Phase 5 – Sensor Scan (correct usage)
-echo "📡 Sensor sweep (accelerometer, light, gyro, mag)..."
-termux-sensor -s accelerometer,light,gyroscope,magnetometer | head -n 8
+# -- Sensor Feedback Check --
+echo "📡 Sensor sweep (Termux API check)..."
+termux-sensor -s accelerometer,light,gyroscope,magnetometer 2>/dev/null | head -n 8 || echo "⚠️ Sensor sweep fallback active."
 
-# Phase 6 – SIM/Router Integrity
-echo "📶 SIM/RIL path integrity check..."
+# -- SIM/RIL Integrity --
+echo "📶 SIM & RIL path intercept scan..."
 getprop | grep -Ei "radio|ril|gsm|sim|network" | grep -i "intercept\|mirror" || echo "✔️ SIM/radio path appears stable."
 
-echo "✅ TRIDEO Watcher Scan Complete — Logs sealed to ~/Vault/perception_tags.glyph"
+echo "✅ TRIDEO Watcher Scan Complete — Output: $GLYPH_OUT"
