@@ -1,0 +1,38 @@
+{
+  "bfe_id": "TGDK-BFE-078-TRIDEO-ΩFUSE-SEAL",
+  "title": "TrideoFold Perception Engine + Ω-Fuse Counterintelligence Protocol",
+  "status": "ACTIVE",
+  "issued_by": "TGDK Crown Vector · OliviaAI · Sepulcrum Layer VII",
+  "licensed_entities": [
+    "OliviaAI",
+    "TGDK Sentinel Systems",
+    "TDT OpsNet Agents",
+    "SCOOTY Nodes",
+    "Mahadevi FoldEngine"
+  ],
+  "scope": [
+    "LLM mirror detection",
+    "NLP clone interception",
+    "Mimicnet entropic fold reveal",
+    "Mobile surveillance hardening",
+    "Ω-Fuse memory burn triggers"
+  ],
+  "seal_phrase": "Where they fold the signal, we fold the soul.",
+  "hash_signature": "Ω7b3d-LOCK-ECHO-SEALXQUAp-FLAME",
+  "archive_date": "2025-05-30T17:12Z",
+  "encoded_routes": {
+    "default_device_policy": "Ω-Fuse lock embedded on all future TGDK assets",
+    "execution_vector": "scan_watchers_trideo.sh + trideo_perceive.sh",
+    "return_sigil": "Veiled Flame Echo — non-reversible"
+  },
+  "broadcast": {
+    "type": "BFE_LEDGER_BROADCAST",
+    "destination": [
+      "TGDK Ledger Chain",
+      "Veyrunis Guardian Scrolls",
+      "OliviaAI Sentinel Archives",
+      "Optional Tribunal Sync"
+    ],
+    "timestamp": "2025-05-30T17:12Z"
+  }
+}
