@@ -1,0 +1,194 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+
+namespace ResidualIncomeFiveColSixDex
+{
+    public sealed class ResidualIncomeInput
+    {
+        public string Period { get; set; } = "";
+        public decimal Revenue { get; set; }
+        public decimal NetIncome { get; set; }
+        public decimal BeginningEquity { get; set; }
+        public decimal CostOfEquityRate { get; set; }   // e.g. 0.105m = 10.5%
+        public decimal Dividends { get; set; }
+        public decimal EndingEquityActual { get; set; }
+        public decimal PriorResidualIncome { get; set; } // optional for trend context
+    }
+
+    public sealed class FiveColRow
+    {
+        public string Period { get; set; } = "";
+
+        // 5 base columns
+        public decimal Revenue { get; set; }
+        public decimal NetIncome { get; set; }
+        public decimal BeginningEquity { get; set; }
+        public decimal EquityCharge { get; set; }
+        public decimal ResidualIncome { get; set; }
+
+        // 6 derived “dex” ratios
+        public decimal Dex1_NetMargin { get; set; }
+        public decimal Dex2_EquityChargeRate { get; set; }
+        public decimal Dex3_ResidualMargin { get; set; }
+        public decimal Dex4_ResidualYield { get; set; }
+        public decimal Dex5_ChargeCoverage { get; set; }
+        public decimal Dex6_CleanSurplusDrift { get; set; }
+
+        // Optional aggregate score
+        public decimal MatrixScore { get; set; }
+    }
+
+    public static class ResidualIncomeMatrix
+    {
+        public static FiveColRow BuildRow(ResidualIncomeInput input)
+        {
+            decimal equityCharge = input.BeginningEquity * input.CostOfEquityRate;
+            decimal residualIncome = input.NetIncome - equityCharge;
+
+            decimal endingEquityExpected =
+                input.BeginningEquity + input.NetIncome - input.Dividends;
+
+            decimal dex1NetMargin = SafeDiv(input.NetIncome, input.Revenue);
+            decimal dex2EquityChargeRate = SafeDiv(equityCharge, input.BeginningEquity);
+            decimal dex3ResidualMargin = SafeDiv(residualIncome, input.Revenue);
+            decimal dex4ResidualYield = SafeDiv(residualIncome, input.BeginningEquity);
+            decimal dex5ChargeCoverage = SafeDiv(input.NetIncome, equityCharge);
+            decimal dex6CleanSurplusDrift =
+                SafeDiv(endingEquityExpected - input.EndingEquityActual, endingEquityExpected);
+
+            // Weighted aggregate, easy to retune
+            decimal matrixScore =
+                (dex1NetMargin * 0.15m) +
+                (dex3ResidualMargin * 0.25m) +
+                (dex4ResidualYield * 0.25m) +
+                (NormalizeCoverage(dex5ChargeCoverage) * 0.20m) +
+                ((1m - Math.Abs(dex6CleanSurplusDrift)) * 0.15m);
+
+            return new FiveColRow
+            {
+                Period = input.Period,
+
+                Revenue = input.Revenue,
+                NetIncome = input.NetIncome,
+                BeginningEquity = input.BeginningEquity,
+                EquityCharge = equityCharge,
+                ResidualIncome = residualIncome,
+
+                Dex1_NetMargin = dex1NetMargin,
+                Dex2_EquityChargeRate = dex2EquityChargeRate,
+                Dex3_ResidualMargin = dex3ResidualMargin,
+                Dex4_ResidualYield = dex4ResidualYield,
+                Dex5_ChargeCoverage = dex5ChargeCoverage,
+                Dex6_CleanSurplusDrift = dex6CleanSurplusDrift,
+
+                MatrixScore = Clamp01(matrixScore)
+            };
+        }
+
+        public static List<FiveColRow> BuildMatrix(IEnumerable<ResidualIncomeInput> inputs)
+        {
+            var rows = new List<FiveColRow>();
+            foreach (var input in inputs)
+            {
+                rows.Add(BuildRow(input));
+            }
+            return rows;
+        }
+
+        private static decimal SafeDiv(decimal numerator, decimal denominator)
+        {
+            if (denominator == 0m) return 0m;
+            return numerator / denominator;
+        }
+
+        private static decimal NormalizeCoverage(decimal coverage)
+        {
+            if (coverage <= 0m) return 0m;
+            if (coverage >= 2m) return 1m;
+            return coverage / 2m;
+        }
+
+        private static decimal Clamp01(decimal value)
+        {
+            if (value < 0m) return 0m;
+            if (value > 1m) return 1m;
+            return value;
+        }
+    }
+
+    public static class Printer
+    {
+        public static void Print(IEnumerable<FiveColRow> rows)
+        {
+            Console.WriteLine(
+                "Period".PadRight(10) +
+                "Revenue".PadLeft(14) +
+                "NetInc".PadLeft(14) +
+                "BegEq".PadLeft(14) +
+                "EqCharge".PadLeft(14) +
+                "ResIncome".PadLeft(14) +
+                "D1".PadLeft(10) +
+                "D2".PadLeft(10) +
+                "D3".PadLeft(10) +
+                "D4".PadLeft(10) +
+                "D5".PadLeft(10) +
+                "D6".PadLeft(10) +
+                "Score".PadLeft(10));
+
+            foreach (var r in rows)
+            {
+                Console.WriteLine(
+                    r.Period.PadRight(10) +
+                    F(r.Revenue).PadLeft(14) +
+                    F(r.NetIncome).PadLeft(14) +
+                    F(r.BeginningEquity).PadLeft(14) +
+                    F(r.EquityCharge).PadLeft(14) +
+                    F(r.ResidualIncome).PadLeft(14) +
+                    P(r.Dex1_NetMargin).PadLeft(10) +
+                    P(r.Dex2_EquityChargeRate).PadLeft(10) +
+                    P(r.Dex3_ResidualMargin).PadLeft(10) +
+                    P(r.Dex4_ResidualYield).PadLeft(10) +
+                    F(r.Dex5_ChargeCoverage).PadLeft(10) +
+                    P(r.Dex6_CleanSurplusDrift).PadLeft(10) +
+                    P(r.MatrixScore).PadLeft(10));
+            }
+        }
+
+        private static string F(decimal v) => v.ToString("0.00", CultureInfo.InvariantCulture);
+        private static string P(decimal v) => v.ToString("0.00%", CultureInfo.InvariantCulture);
+    }
+
+    public static class Program
+    {
+        public static void Main()
+        {
+            var inputs = new List<ResidualIncomeInput>
+            {
+                new ResidualIncomeInput
+                {
+                    Period = "2026-Q1",
+                    Revenue = 1200000m,
+                    NetIncome = 155000m,
+                    BeginningEquity = 1000000m,
+                    CostOfEquityRate = 0.105m,
+                    Dividends = 25000m,
+                    EndingEquityActual = 1132000m
+                },
+                new ResidualIncomeInput
+                {
+                    Period = "2026-Q2",
+                    Revenue = 1325000m,
+                    NetIncome = 181000m,
+                    BeginningEquity = 1132000m,
+                    CostOfEquityRate = 0.105m,
+                    Dividends = 30000m,
+                    EndingEquityActual = 1280000m
+                }
+            };
+
+            var matrix = ResidualIncomeMatrix.BuildMatrix(inputs);
+            Printer.Print(matrix);
+        }
+    }
+}
