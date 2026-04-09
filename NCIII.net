@@ -1,0 +1,184 @@
+from dataclasses import dataclass
+from typing import List, Literal
+from enum import Enum, auto
+from datetime import datetime, timedelta
+
+class SignalType(Enum):
+    MOOD_CHANGE = auto()
+    WITHDRAWAL = auto()
+    CONFLICT_SPIKE = auto()
+    SLEEP_OR_FATIGUE = auto()
+    SUBSTANCE_CONCERN = auto()
+    ACCESS_ANOMALY = auto()
+    RULE_VIOLATION = auto()
+    VERBAL_THREAT = auto()
+    BODY_LANGUAGE_CUE = auto()
+    WELFARE_CONCERN = auto()
+
+class BodyLanguageFlag(Enum):
+    NONE = auto()
+    ARMS_TIGHT_ACROSS_CHEST = auto()
+    CLENCHED_FISTS = auto()
+    HEAVY_BREATHING = auto()
+    PACING_OR_AGITATION = auto()
+    TERRIFIED_LOOK = auto()
+    FIXED_STARE = auto()
+    THREATENING_POSTURE = auto()
+    SUDDEN_BEHAVIOR_CHANGE = auto()
+
+class EscalationPath(Enum):
+    NONE = auto()
+    SUPPORT_CONVERSATION = auto()
+    EAP_OR_MENTAL_HEALTH_REFERRAL = auto()
+    SUPERVISOR_REVIEW = auto()
+    SECURITY_REVIEW = auto()
+    EXT5_HUMAN_REVIEW = auto()
+    LAWFUL_THREAT_REPORTING = auto()
+
+@dataclass
+class SignalEvent:
+    timestamp: datetime
+    type: SignalType
+    weight: float  # 0..1
+    source: str = ""
+    notes: str = ""
+    body_flag: BodyLanguageFlag = BodyLanguageFlag.NONE
+
+@dataclass
+class SubjectState:
+    subject_id: str
+    events: List[SignalEvent]
+    immediate_danger_cue: bool = False
+    credible_threat_cue: bool = False
+    don_context: bool = False  # Department of the Navy
+
+@dataclass
+class DistressAssessment:
+    distress_score: float
+    behavior_corroboration_score: float
+    ext5_triggered: bool
+    path: EscalationPath
+    reasons: List[str]
+
+class DistressEngine:
+    def assess(self, state: SubjectState) -> DistressAssessment:
+        recent = [
+            e for e in state.events
+            if e.timestamp >= datetime.utcnow() - timedelta(days=14)
+        ]
+
+        distress_score = min(1.0, max(0.0, sum(
+            e.weight for e in recent if e.type != SignalType.BODY_LANGUAGE_CUE
+        )))
+
+        behavior_score = min(1.0, max(0.0, sum(
+            e.weight for e in recent if e.type == SignalType.BODY_LANGUAGE_CUE
+        )))
+
+        reasons = []
+        if any(e.type == SignalType.WITHDRAWAL for e in recent):
+            reasons.append("withdrawal/change in engagement")
+        if any(e.type == SignalType.CONFLICT_SPIKE for e in recent):
+            reasons.append("conflict or agitation pattern")
+        if any(e.type == SignalType.SLEEP_OR_FATIGUE for e in recent):
+            reasons.append("fatigue/sleep-related distress signal")
+        if any(e.type == SignalType.SUBSTANCE_CONCERN for e in recent):
+            reasons.append("substance-related concern")
+        if any(e.type == SignalType.ACCESS_ANOMALY for e in recent):
+            reasons.append("access or security anomaly")
+        if any(e.type == SignalType.BODY_LANGUAGE_CUE for e in recent):
+            reasons.append("live body-language corroboration observed")
+
+        ext5_triggered = (
+            state.immediate_danger_cue or
+            state.credible_threat_cue or
+            (distress_score >= 0.65 and behavior_score >= 0.25) or
+            any(e.type == SignalType.VERBAL_THREAT for e in recent)
+        )
+
+        if state.immediate_danger_cue:
+            path = EscalationPath.LAWFUL_THREAT_REPORTING
+            reasons.append("immediate danger cue present")
+        elif ext5_triggered:
+            if state.credible_threat_cue:
+                path = (
+                    EscalationPath.LAWFUL_THREAT_REPORTING
+                    if state.don_context
+                    else EscalationPath.SECURITY_REVIEW
+                )
+                reasons.append("credible threat threshold met")
+            else:
+                path = EscalationPath.EXT5_HUMAN_REVIEW
+                reasons.append("multi-signal threshold met for human review")
+        elif distress_score >= 0.45:
+            path = EscalationPath.SUPPORT_CONVERSATION
+            reasons.append("moderate distress pattern")
+        elif distress_score >= 0.30:
+            path = EscalationPath.EAP_OR_MENTAL_HEALTH_REFERRAL
+            reasons.append("low-to-moderate distress support indicated")
+        else:
+            path = EscalationPath.NONE
+
+        return DistressAssessment(
+            distress_score=distress_score,
+            behavior_corroboration_score=behavior_score,
+            ext5_triggered=ext5_triggered,
+            path=path,
+            reasons=reasons
+        )
+
+# Example usage
+if __name__ == "__main__":
+    engine = DistressEngine()
+    state = SubjectState(
+        subject_id="person-01",
+        don_context=True,
+        events=[
+            SignalEvent(
+                timestamp=datetime.utcnow(),
+                type=SignalType.WITHDRAWAL,
+                weight=0.18,
+                source="manager",
+                notes="Pulled away from coworkers"
+            ),
+            SignalEvent(
+                timestamp=datetime.utcnow(),
+                type=SignalType.CONFLICT_SPIKE,
+                weight=0.20,
+                source="peer",
+                notes="Sharp increase in confrontational behavior"
+            ),
+            SignalEvent(
+                timestamp=datetime.utcnow(),
+                type=SignalType.SLEEP_OR_FATIGUE,
+                weight=0.12,
+                source="self-report",
+                notes="Not sleeping, visibly exhausted"
+            ),
+            SignalEvent(
+                timestamp=datetime.utcnow(),
+                type=SignalType.BODY_LANGUAGE_CUE,
+                weight=0.12,
+                body_flag=BodyLanguageFlag.PACING_OR_AGITATION,
+                source="observer",
+                notes="Pacing and agitated"
+            ),
+            SignalEvent(
+                timestamp=datetime.utcnow(),
+                type=SignalType.BODY_LANGUAGE_CUE,
+                weight=0.14,
+                body_flag=BodyLanguageFlag.HEAVY_BREATHING,
+                source="observer",
+                notes="Heavy breathing during confrontation"
+            )
+        ]
+    )
+
+    assessment = engine.assess(state)
+    print(f"DistressScore: {assessment.distress_score:.2f}")
+    print(f"BehaviorCorroboration: {assessment.behavior_corroboration_score:.2f}")
+    print(f"Ext5Triggered: {assessment.ext5_triggered}")
+    print(f"Path: {assessment.path.name}")
+    print("Reasons:")
+    for reason in assessment.reasons:
+        print(f"- {reason}")
