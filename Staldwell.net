@@ -1,0 +1,224 @@
+from dataclasses import dataclass, field, asdict
+from typing import List, Dict, Any
+import json
+
+
+# ==========================================
+# STALDWELL :: IMPLICATE / PERFORM / REDUCE
+# ==========================================
+
+@dataclass
+class StaldwellInput:
+    query: str
+    state: str
+    target: str
+    procedure: List[str] = field(default_factory=list)
+    assets: List[str] = field(default_factory=list)
+    constraints: List[str] = field(default_factory=list)
+    risks: List[str] = field(default_factory=list)
+    signals: List[str] = field(default_factory=list)
+    policy: str = "ColdSmart"
+
+
+@dataclass
+class StaldwellPhase:
+    name: str
+    purpose: str
+    actions: List[str]
+    score: float
+    notes: List[str] = field(default_factory=list)
+
+
+@dataclass
+class StaldwellResult:
+    state_assessment: str
+    target_assessment: str
+    phases: List[Dict[str, Any]]
+    best_route: List[str]
+    command_sentence: str
+
+
+class StaldwellIPR:
+    def __init__(self, policy: str = "ColdSmart"):
+        self.policy = policy
+
+    def process(self, spec: StaldwellInput) -> StaldwellResult:
+        state_assessment = self.assess_state(spec)
+        target_assessment = self.assess_target(spec)
+
+        implicate = self.phase_implicate(spec)
+        perform = self.phase_perform(spec)
+        reduce = self.phase_reduce(spec)
+
+        phases = [implicate, perform, reduce]
+        best_route = self.build_route(phases)
+        command_sentence = self.command(spec, best_route)
+
+        return StaldwellResult(
+            state_assessment=state_assessment,
+            target_assessment=target_assessment,
+            phases=[asdict(p) for p in phases],
+            best_route=best_route,
+            command_sentence=command_sentence,
+        )
+
+    def assess_state(self, spec: StaldwellInput) -> str:
+        s = spec.state.lower()
+        notes = [f"State: {spec.state}."]
+        if "unstable" in s:
+            notes.append("State requires containment before expansion.")
+        if "strong" in s:
+            notes.append("State can bear pressure.")
+        if "adapt" in s:
+            notes.append("State can shift under load.")
+        if spec.risks:
+            notes.append(f"Risks: {', '.join(spec.risks)}.")
+        if spec.constraints:
+            notes.append(f"Constraints: {', '.join(spec.constraints)}.")
+        return " ".join(notes)
+
+    def assess_target(self, spec: StaldwellInput) -> str:
+        t = spec.target.lower()
+        if "adapter" in t:
+            return f"Target '{spec.target}' is a translation system: it must convert pressure into usable action."
+        return f"Target '{spec.target}' is treated as a procedural destination requiring fit and survivability."
+
+    def phase_implicate(self, spec: StaldwellInput) -> StaldwellPhase:
+        actions = [
+            "identify all relevant forces touching the target",
+            "bind assets to target requirements",
+            "bind risks to likely failure points",
+            "bind constraints to execution limits",
+            "name what must survive the procedure",
+        ]
+        score = 0.72
+        notes = []
+
+        if spec.assets:
+            score += 0.08
+            notes.append("Assets improve implication fidelity.")
+        if spec.signals:
+            score += 0.05
+            notes.append("Signals improve contextual resolution.")
+        if spec.risks:
+            score += 0.05
+            notes.append("Risks sharpen dependency mapping.")
+
+        return StaldwellPhase(
+            name="implicate",
+            purpose="Establish what is connected, what matters, and what failure touches.",
+            actions=actions,
+            score=min(score, 1.0),
+            notes=notes,
+        )
+
+    def phase_perform(self, spec: StaldwellInput) -> StaldwellPhase:
+        actions = [
+            "select the strongest viable action",
+            "execute in sequence, not in panic",
+            "preserve target fit during force application",
+            "measure whether the action improved position",
+            "hold pressure only while it produces gain",
+        ]
+        score = 0.70
+        notes = []
+
+        if "strong" in spec.state.lower():
+            score += 0.10
+            notes.append("Strong state favors execution.")
+        if spec.procedure:
+            score += 0.07
+            notes.append("Existing procedure improves operational continuity.")
+        if "adapter" in spec.target.lower():
+            score += 0.05
+            notes.append("Target benefits from active translation and deployment.")
+
+        return StaldwellPhase(
+            name="perform",
+            purpose="Take decisive action with force, order, and measurable intent.",
+            actions=actions,
+            score=min(score, 1.0),
+            notes=notes,
+        )
+
+    def phase_reduce(self, spec: StaldwellInput) -> StaldwellPhase:
+        actions = [
+            "strip nonessential layers",
+            "retain only what proved effective",
+            "compress findings into reusable form",
+            "remove waste, noise, and decorative drag",
+            "leave behind a smaller and stronger system",
+        ]
+        score = 0.75
+        notes = []
+
+        if spec.constraints:
+            score += 0.06
+            notes.append("Constraints reward reduction.")
+        if spec.risks:
+            score += 0.06
+            notes.append("Risk exposure rewards compression and cleanup.")
+        if "complex" in spec.query.lower():
+            score += 0.04
+            notes.append("Complexity increases the value of reduction.")
+
+        return StaldwellPhase(
+            name="reduce",
+            purpose="Simplify after action so only durable value remains.",
+            actions=actions,
+            score=min(score, 1.0),
+            notes=notes,
+        )
+
+    def build_route(self, phases: List[StaldwellPhase]) -> List[str]:
+        route = []
+        for phase in phases:
+            route.append(f"{phase.name.upper()}: {phase.actions[0]}")
+        return route
+
+    def command(self, spec: StaldwellInput, route: List[str]) -> str:
+        return (
+            f"Staldwell command: implicate the field around '{spec.target}', "
+            f"perform the strongest viable action from '{spec.state}', "
+            f"then reduce the system until only durable advantage remains."
+        )
+
+
+# ==========================================
+# EXAMPLE
+# ==========================================
+
+if __name__ == "__main__":
+    spec = StaldwellInput(
+        query="Ryzen is excessive, strong, adaptable. I want a complex adapter.",
+        state="strong, adaptable, slightly unstable under abstraction load",
+        target="complex adaptive adapter",
+        procedure=[
+            "map force",
+            "build core",
+            "test pressure",
+            "compress result"
+        ],
+        assets=[
+            "strong base identity",
+            "adaptable design",
+            "high throughput concept"
+        ],
+        constraints=[
+            "must remain usable",
+            "must survive pressure"
+        ],
+        risks=[
+            "overbuilding",
+            "signal dilution"
+        ],
+        signals=[
+            "desire for strength",
+            "desire for layered execution"
+        ],
+        policy="ColdSmart",
+    )
+
+    engine = StaldwellIPR()
+    result = engine.process(spec)
+    print(json.dumps(asdict(result), indent=2))
