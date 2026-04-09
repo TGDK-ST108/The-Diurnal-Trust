@@ -1,0 +1,556 @@
+// Program.cs
+// .NET 8 minimal API
+//
+// Safe purpose:
+// - exclude uninvolved civilians from investigative / therapy / review pipelines
+// - de-identify intake
+// - require review before retention
+// - audit every action
+//
+// Run:
+//   dotnet new web -n Met5Protocol
+//   replace Program.cs with this file
+//   set MET5_HMAC_KEY=change-me-32bytes-min
+//   set MET5_AES_KEY_BASE64=<32-byte-base64-key>
+//   dotnet run
+//
+// Notes:
+// - In-memory storage for scaffold/demo
+// - Replace with PostgreSQL/SQL Server in production
+// - No doxxing, no publication, no targeting workflows
+
+using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+
+var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddSingleton<CryptoService>();
+builder.Services.AddSingleton<Met5Engine>();
+
+var app = builder.Build();
+
+app.MapGet("/", () => Results.Ok(new
+{
+    service = "MET-5 Civilian Exclusion Protocol",
+    version = "1.0.0",
+    mode = "safe-filtering",
+    status = "ok"
+}));
+
+app.MapPost("/cases/intake", (CaseIntakeRequest req, Met5Engine engine) =>
+{
+    var result = engine.Intake(req);
+    return Results.Ok(result);
+});
+
+app.MapGet("/cases/{caseId}", (string caseId, Met5Engine engine) =>
+{
+    var result = engine.GetCase(caseId);
+    return result is null
+        ? Results.NotFound(new { ok = false, error = "case_not_found" })
+        : Results.Ok(result);
+});
+
+app.MapPost("/cases/{caseId}/review/retain/{recordId}", (
+    string caseId,
+    string recordId,
+    ReviewRequest req,
+    Met5Engine engine) =>
+{
+    var result = engine.Retain(caseId, recordId, req);
+    return result is null
+        ? Results.NotFound(new { ok = false, error = "record_not_found" })
+        : Results.Ok(result);
+});
+
+app.MapPost("/cases/{caseId}/review/purge/{recordId}", (
+    string caseId,
+    string recordId,
+    ReviewRequest req,
+    Met5Engine engine) =>
+{
+    var result = engine.Purge(caseId, recordId, req);
+    return result is null
+        ? Results.NotFound(new { ok = false, error = "record_not_found" })
+        : Results.Ok(result);
+});
+
+app.MapPost("/maintenance/purge-expired", (Met5Engine engine) =>
+{
+    var result = engine.PurgeExpired();
+    return Results.Ok(result);
+});
+
+app.MapGet("/audit/{caseId}", (string caseId, Met5Engine engine) =>
+{
+    return Results.Ok(engine.GetAudit(caseId));
+});
+
+app.Run();
+
+public sealed class Met5Engine
+{
+    private readonly CryptoService _crypto;
+    private readonly ConcurrentDictionary<string, CaseFile> _cases = new(StringComparer.OrdinalIgnoreCase);
+
+    public Met5Engine(CryptoService crypto)
+    {
+        _crypto = crypto;
+    }
+
+    public object Intake(CaseIntakeRequest req)
+    {
+        var caseFile = _cases.GetOrAdd(req.CaseId, id => new CaseFile
+        {
+            CaseId = id,
+            CreatedUtc = DateTimeOffset.UtcNow
+        });
+
+        var now = DateTimeOffset.UtcNow;
+        var subjectToken = _crypto.Tokenize(
+            req.Subject.FullName,
+            req.Subject.DateOfBirth ?? "",
+            req.Subject.Email ?? "",
+            req.Subject.Phone ?? ""
+        );
+
+        var relevance = ComputeRelevance(req);
+        var disposition = ComputeDisposition(req, relevance);
+        var purgeAt = disposition == RecordDisposition.Excluded
+            ? now.AddDays(30)
+            : now.AddDays(180);
+
+        var encryptedSubject = disposition == RecordDisposition.Excluded
+            ? null
+            : _crypto.EncryptJson(req.Subject);
+
+        var record = new SubjectRecord
+        {
+            RecordId = $"rec_{Guid.NewGuid():N}",
+            CaseId = req.CaseId,
+            TokenId = subjectToken,
+            FullNameMasked = MaskName(req.Subject.FullName),
+            Relation = req.Relation,
+            EvidenceScore = req.EvidenceScore,
+            RelevanceScore = relevance,
+            Disposition = disposition,
+            CreatedUtc = now,
+            PurgeAtUtc = purgeAt,
+            Justification = disposition == RecordDisposition.Excluded
+                ? "Excluded by default: insufficient direct relevance."
+                : "Pending human review before any retention.",
+            EncryptedSubjectJson = encryptedSubject,
+            Tags = req.Tags ?? new Dictionary<string, string>()
+        };
+
+        caseFile.Records[record.RecordId] = record;
+
+        AddAudit(caseFile, new AuditEvent
+        {
+            EventId = $"aud_{Guid.NewGuid():N}",
+            CaseId = req.CaseId,
+            RecordId = record.RecordId,
+            Action = "intake",
+            Actor = req.Actor,
+            TimestampUtc = now,
+            Notes = $"{record.Disposition} | relation={req.Relation} | evidence={req.EvidenceScore:F2} | relevance={record.RelevanceScore:F2}"
+        });
+
+        return new
+        {
+            ok = true,
+            caseId = req.CaseId,
+            recordId = record.RecordId,
+            tokenId = record.TokenId,
+            disposition = record.Disposition.ToString(),
+            purgeAtUtc = record.PurgeAtUtc,
+            maskedName = record.FullNameMasked,
+            relevanceScore = record.RelevanceScore
+        };
+    }
+
+    public object? GetCase(string caseId)
+    {
+        if (!_cases.TryGetValue(caseId, out var caseFile))
+            return null;
+
+        var records = caseFile.Records.Values
+            .OrderByDescending(x => x.CreatedUtc)
+            .Select(x => new
+            {
+                x.RecordId,
+                x.TokenId,
+                x.FullNameMasked,
+                x.Relation,
+                x.EvidenceScore,
+                x.RelevanceScore,
+                disposition = x.Disposition.ToString(),
+                x.CreatedUtc,
+                x.PurgeAtUtc,
+                x.Justification,
+                x.Tags
+            })
+            .ToList();
+
+        return new
+        {
+            ok = true,
+            caseId = caseFile.CaseId,
+            caseFile.CreatedUtc,
+            records,
+            counts = new
+            {
+                total = records.Count,
+                excluded = records.Count(x => x.disposition == nameof(RecordDisposition.Excluded)),
+                pending = records.Count(x => x.disposition == nameof(RecordDisposition.PendingReview)),
+                retained = records.Count(x => x.disposition == nameof(RecordDisposition.Retained)),
+                purged = records.Count(x => x.disposition == nameof(RecordDisposition.Purged))
+            }
+        };
+    }
+
+    public object? Retain(string caseId, string recordId, ReviewRequest req)
+    {
+        if (!_cases.TryGetValue(caseId, out var caseFile))
+            return null;
+        if (!caseFile.Records.TryGetValue(recordId, out var record))
+            return null;
+        if (record.Disposition == RecordDisposition.Purged)
+            return null;
+
+        record.Disposition = RecordDisposition.Retained;
+        record.Justification = $"Retained after review: {req.Reason}";
+        record.Reviewer = req.Actor;
+        record.ReviewedUtc = DateTimeOffset.UtcNow;
+        record.PurgeAtUtc = DateTimeOffset.UtcNow.AddDays(365);
+
+        AddAudit(caseFile, new AuditEvent
+        {
+            EventId = $"aud_{Guid.NewGuid():N}",
+            CaseId = caseId,
+            RecordId = recordId,
+            Action = "retain",
+            Actor = req.Actor,
+            TimestampUtc = DateTimeOffset.UtcNow,
+            Notes = req.Reason
+        });
+
+        return new
+        {
+            ok = true,
+            caseId,
+            recordId,
+            disposition = record.Disposition.ToString(),
+            reviewer = record.Reviewer,
+            reviewedUtc = record.ReviewedUtc,
+            purgeAtUtc = record.PurgeAtUtc
+        };
+    }
+
+    public object? Purge(string caseId, string recordId, ReviewRequest req)
+    {
+        if (!_cases.TryGetValue(caseId, out var caseFile))
+            return null;
+        if (!caseFile.Records.TryGetValue(recordId, out var record))
+            return null;
+
+        record.Disposition = RecordDisposition.Purged;
+        record.Justification = $"Purged: {req.Reason}";
+        record.Reviewer = req.Actor;
+        record.ReviewedUtc = DateTimeOffset.UtcNow;
+        record.EncryptedSubjectJson = null;
+        record.Tags = new Dictionary<string, string>();
+
+        AddAudit(caseFile, new AuditEvent
+        {
+            EventId = $"aud_{Guid.NewGuid():N}",
+            CaseId = caseId,
+            RecordId = recordId,
+            Action = "purge",
+            Actor = req.Actor,
+            TimestampUtc = DateTimeOffset.UtcNow,
+            Notes = req.Reason
+        });
+
+        return new
+        {
+            ok = true,
+            caseId,
+            recordId,
+            disposition = record.Disposition.ToString(),
+            reviewer = record.Reviewer,
+            reviewedUtc = record.ReviewedUtc
+        };
+    }
+
+    public object PurgeExpired()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var touched = new List<object>();
+
+        foreach (var caseFile in _cases.Values)
+        {
+            foreach (var record in caseFile.Records.Values)
+            {
+                if (record.Disposition != RecordDisposition.Purged && record.PurgeAtUtc <= now)
+                {
+                    record.Disposition = RecordDisposition.Purged;
+                    record.EncryptedSubjectJson = null;
+                    record.Tags = new Dictionary<string, string>();
+                    record.ReviewedUtc = now;
+                    record.Reviewer = "system";
+                    record.Justification = "Auto-purged by retention policy.";
+
+                    AddAudit(caseFile, new AuditEvent
+                    {
+                        EventId = $"aud_{Guid.NewGuid():N}",
+                        CaseId = caseFile.CaseId,
+                        RecordId = record.RecordId,
+                        Action = "auto_purge",
+                        Actor = "system",
+                        TimestampUtc = now,
+                        Notes = "Retention window expired."
+                    });
+
+                    touched.Add(new
+                    {
+                        caseFile.CaseId,
+                        record.RecordId,
+                        disposition = record.Disposition.ToString()
+                    });
+                }
+            }
+        }
+
+        return new
+        {
+            ok = true,
+            purgedCount = touched.Count,
+            records = touched
+        };
+    }
+
+    public object GetAudit(string caseId)
+    {
+        if (!_cases.TryGetValue(caseId, out var caseFile))
+        {
+            return new
+            {
+                ok = false,
+                error = "case_not_found"
+            };
+        }
+
+        return new
+        {
+            ok = true,
+            caseId,
+            events = caseFile.Audit
+                .OrderByDescending(x => x.TimestampUtc)
+                .Select(x => new
+                {
+                    x.EventId,
+                    x.RecordId,
+                    x.Action,
+                    x.Actor,
+                    x.TimestampUtc,
+                    x.Notes
+                })
+        };
+    }
+
+    private static void AddAudit(CaseFile caseFile, AuditEvent evt)
+    {
+        lock (caseFile.Audit)
+        {
+            caseFile.Audit.Add(evt);
+        }
+    }
+
+    private static double ComputeRelevance(CaseIntakeRequest req)
+    {
+        double relationWeight = req.Relation.ToLowerInvariant() switch
+        {
+            "primary_subject" => 1.00,
+            "direct_witness" => 0.85,
+            "victim" => 0.95,
+            "investigator" => 0.70,
+            "associate" => 0.45,
+            "bystander" => 0.10,
+            "unknown" => 0.05,
+            "collateral" => 0.00,
+            _ => 0.20
+        };
+
+        double evidenceWeight = Math.Clamp(req.EvidenceScore, 0.0, 1.0);
+        double tagWeight = req.Tags is { Count: > 0 } ? 0.05 : 0.0;
+
+        return Math.Round(Math.Clamp((relationWeight * 0.65) + (evidenceWeight * 0.30) + tagWeight, 0.0, 1.0), 4);
+    }
+
+    private static RecordDisposition ComputeDisposition(CaseIntakeRequest req, double relevance)
+    {
+        var lowRelation = req.Relation.Equals("bystander", StringComparison.OrdinalIgnoreCase)
+                       || req.Relation.Equals("unknown", StringComparison.OrdinalIgnoreCase)
+                       || req.Relation.Equals("collateral", StringComparison.OrdinalIgnoreCase);
+
+        if (lowRelation || relevance < 0.55 || req.EvidenceScore < 0.50)
+            return RecordDisposition.Excluded;
+
+        return RecordDisposition.PendingReview;
+    }
+
+    private static string MaskName(string fullName)
+    {
+        if (string.IsNullOrWhiteSpace(fullName))
+            return "REDACTED";
+
+        var parts = fullName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 1)
+            return $"{parts[0][0]}***";
+
+        return string.Join(" ", parts.Select((p, i) =>
+            i == parts.Length - 1 ? $"{p[0]}***" : p));
+    }
+}
+
+public sealed class CryptoService
+{
+    private readonly byte[] _aesKey;
+    private readonly byte[] _hmacKey;
+
+    public CryptoService()
+    {
+        _aesKey = ResolveAesKey();
+        _hmacKey = ResolveHmacKey();
+    }
+
+    public string Tokenize(params string[] values)
+    {
+        var joined = string.Join("|", values.Select(v => v?.Trim().ToLowerInvariant() ?? ""));
+        using var hmac = new HMACSHA256(_hmacKey);
+        return Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(joined)))[..24];
+    }
+
+    public string EncryptJson<T>(T value)
+    {
+        var plaintext = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(value));
+        var nonce = RandomNumberGenerator.GetBytes(12);
+        var ciphertext = new byte[plaintext.Length];
+        var tag = new byte[16];
+
+        using var aes = new AesGcm(_aesKey, 16);
+        aes.Encrypt(nonce, plaintext, ciphertext, tag);
+
+        var packed = new EncryptedBlob
+        {
+            Nonce = Convert.ToBase64String(nonce),
+            Ciphertext = Convert.ToBase64String(ciphertext),
+            Tag = Convert.ToBase64String(tag)
+        };
+
+        return JsonSerializer.Serialize(packed);
+    }
+
+    private static byte[] ResolveAesKey()
+    {
+        var env = Environment.GetEnvironmentVariable("MET5_AES_KEY_BASE64");
+        if (!string.IsNullOrWhiteSpace(env))
+        {
+            var key = Convert.FromBase64String(env);
+            if (key.Length == 32) return key;
+        }
+
+        return SHA256.HashData(Encoding.UTF8.GetBytes("development-only-aes-key-change-me"));
+    }
+
+    private static byte[] ResolveHmacKey()
+    {
+        var env = Environment.GetEnvironmentVariable("MET5_HMAC_KEY");
+        if (!string.IsNullOrWhiteSpace(env))
+        {
+            return SHA256.HashData(Encoding.UTF8.GetBytes(env));
+        }
+
+        return SHA256.HashData(Encoding.UTF8.GetBytes("development-only-hmac-key-change-me"));
+    }
+}
+
+public sealed class CaseFile
+{
+    public string CaseId { get; set; } = "";
+    public DateTimeOffset CreatedUtc { get; set; }
+    public ConcurrentDictionary<string, SubjectRecord> Records { get; } = new();
+    public List<AuditEvent> Audit { get; } = new();
+}
+
+public sealed class SubjectRecord
+{
+    public string RecordId { get; set; } = "";
+    public string CaseId { get; set; } = "";
+    public string TokenId { get; set; } = "";
+    public string FullNameMasked { get; set; } = "";
+    public string Relation { get; set; } = "";
+    public double EvidenceScore { get; set; }
+    public double RelevanceScore { get; set; }
+    public RecordDisposition Disposition { get; set; }
+    public DateTimeOffset CreatedUtc { get; set; }
+    public DateTimeOffset PurgeAtUtc { get; set; }
+    public DateTimeOffset? ReviewedUtc { get; set; }
+    public string? Reviewer { get; set; }
+    public string Justification { get; set; } = "";
+    public string? EncryptedSubjectJson { get; set; }
+    public Dictionary<string, string> Tags { get; set; } = new();
+}
+
+public enum RecordDisposition
+{
+    Excluded,
+    PendingReview,
+    Retained,
+    Purged
+}
+
+public sealed class AuditEvent
+{
+    public string EventId { get; set; } = "";
+    public string CaseId { get; set; } = "";
+    public string RecordId { get; set; } = "";
+    public string Action { get; set; } = "";
+    public string Actor { get; set; } = "";
+    public DateTimeOffset TimestampUtc { get; set; }
+    public string Notes { get; set; } = "";
+}
+
+public sealed class EncryptedBlob
+{
+    public string Nonce { get; set; } = "";
+    public string Ciphertext { get; set; } = "";
+    public string Tag { get; set; } = "";
+}
+
+public sealed class CaseIntakeRequest
+{
+    public string CaseId { get; set; } = "";
+    public string Actor { get; set; } = "system";
+    public string Relation { get; set; } = "unknown";
+    public double EvidenceScore { get; set; }
+    public SubjectPayload Subject { get; set; } = new();
+    public Dictionary<string, string>? Tags { get; set; }
+}
+
+public sealed class SubjectPayload
+{
+    public string FullName { get; set; } = "";
+    public string? DateOfBirth { get; set; }
+    public string? Email { get; set; }
+    public string? Phone { get; set; }
+    public string? Notes { get; set; }
+}
+
+public sealed class ReviewRequest
+{
+    public string Actor { get; set; } = "";
+    public string Reason { get; set; } = "";
+}
