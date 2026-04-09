@@ -1,0 +1,863 @@
+using System;
+using System.Collections.Generic;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Data.Sqlite;
+
+namespace CmdPolDotNet
+{
+    public sealed class CommandContext
+    {
+        public string UserId { get; set; } = "";
+        public string Role { get; set; } = "";
+        public string Command { get; set; } = "";
+        public string Prompt { get; set; } = "";
+        public List<string> RequestedTools { get; set; } = new();
+        public Dictionary<string, int> Strengths { get; set; } = new();
+        public Dictionary<string, int> Weaknesses { get; set; } = new();
+        public int RiskScore { get; set; }
+        public int WitnessXp { get; private set; }
+        public Dictionary<string, object> Metadata { get; set; } = new();
+        public List<AuditRecord> AuditLog { get; set; } = new();
+
+        public void Log(string evt, object details)
+        {
+            AuditLog.Add(new AuditRecord
+            {
+                Ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                Event = evt,
+                Details = details
+            });
+        }
+
+        public void AddWitnessXp(int xp)
+        {
+            WitnessXp += xp;
+            Log("witness_xp", new { delta = xp, total = WitnessXp });
+        }
+
+        public void AdjustAttribute(string attribute, int value)
+        {
+            if (Strengths.ContainsKey(attribute))
+            {
+                Strengths[attribute] += value;
+                Log("strength_adjusted", new { attribute, delta = value, updated = Strengths[attribute] });
+                return;
+            }
+
+            if (Weaknesses.ContainsKey(attribute))
+            {
+                Weaknesses[attribute] += value;
+                Log("weakness_adjusted", new { attribute, delta = value, updated = Weaknesses[attribute] });
+                return;
+            }
+
+            Log("attribute_missing", new { attribute, attemptedDelta = value });
+        }
+    }
+
+    public sealed class AuditRecord
+    {
+        public long Ts { get; set; }
+        public string Event { get; set; } = "";
+        public object Details { get; set; } = new();
+    }
+
+    public sealed class AccessDecision
+    {
+        public bool Allowed { get; set; }
+        public string Reason { get; set; } = "";
+        public List<string> AllowedTools { get; set; } = new();
+        public List<string> DeniedTools { get; set; } = new();
+    }
+
+    public sealed class WitnessRule
+    {
+        public string Name { get; }
+        public Func<CommandContext, bool> TriggerCondition { get; }
+        public Func<CommandContext, Task> Action { get; }
+
+        public WitnessRule(
+            string name,
+            Func<CommandContext, bool> triggerCondition,
+            Func<CommandContext, Task> action)
+        {
+            Name = name;
+            TriggerCondition = triggerCondition;
+            Action = action;
+        }
+
+        public async Task CheckAsync(CommandContext ctx)
+        {
+            if (TriggerCondition(ctx))
+            {
+                await Action(ctx);
+                ctx.Log("witness_rule_triggered", new { rule = Name });
+            }
+        }
+    }
+
+    public sealed class AsyncEventBus
+    {
+        private readonly Dictionary<string, List<Func<object?[], Task>>> _hooks = new();
+
+        public void On(string eventType, Func<object?[], Task> hook)
+        {
+            if (!_hooks.ContainsKey(eventType))
+                _hooks[eventType] = new List<Func<object?[], Task>>();
+
+            _hooks[eventType].Add(hook);
+        }
+
+        public async Task EmitAsync(string eventType, params object?[] args)
+        {
+            if (!_hooks.TryGetValue(eventType, out var handlers))
+                return;
+
+            var tasks = new List<Task>(handlers.Count);
+            foreach (var handler in handlers)
+                tasks.Add(handler(args));
+
+            await Task.WhenAll(tasks);
+        }
+    }
+
+    public sealed class CommandPolicy
+    {
+        public Dictionary<string, RolePermission> RolePermissions { get; } = new();
+        public HashSet<string> BlockedCommands { get; } = new();
+        public Dictionary<string, int> MaxRiskByRole { get; } = new();
+
+        public CommandPolicy()
+        {
+            RolePermissions["viewer"] = new RolePermission(
+                new[] { "summarize", "explain", "classify" },
+                new[] { "get_policy_snapshot" });
+
+            RolePermissions["operator"] = new RolePermission(
+                new[] { "summarize", "explain", "classify", "analyze", "draft" },
+                new[] { "get_policy_snapshot", "log_witness_feedback", "custom_analyzer" });
+
+            RolePermissions["admin"] = new RolePermission(
+                new[] { "*" },
+                new[] { "get_policy_snapshot", "log_witness_feedback", "custom_analyzer" });
+
+            BlockedCommands.UnionWith(new[] { "delete_data", "run_shell", "rotate_secrets" });
+
+            MaxRiskByRole["viewer"] = 1;
+            MaxRiskByRole["operator"] = 3;
+            MaxRiskByRole["admin"] = 5;
+        }
+
+        public virtual AccessDecision Decide(CommandContext ctx)
+        {
+            if ((ctx.Command == "analyze" || ctx.Command == "draft") &&
+                ctx.Metadata.TryGetValue("urgent", out var urgentObj) &&
+                urgentObj is bool urgent &&
+                urgent)
+            {
+                ctx.RiskScore += 1;
+                ctx.Log("risk_adjusted", new { reason = "urgent_command", newRisk = ctx.RiskScore });
+            }
+
+            if (BlockedCommands.Contains(ctx.Command))
+            {
+                return new AccessDecision
+                {
+                    Allowed = false,
+                    Reason = $"command '{ctx.Command}' is hard-blocked by policy",
+                    DeniedTools = new List<string>(ctx.RequestedTools)
+                };
+            }
+
+            if (!RolePermissions.TryGetValue(ctx.Role, out var perms))
+            {
+                return new AccessDecision
+                {
+                    Allowed = false,
+                    Reason = $"unknown role '{ctx.Role}'",
+                    DeniedTools = new List<string>(ctx.RequestedTools)
+                };
+            }
+
+            if (!perms.Commands.Contains("*") && !perms.Commands.Contains(ctx.Command))
+            {
+                return new AccessDecision
+                {
+                    Allowed = false,
+                    Reason = $"role '{ctx.Role}' cannot run '{ctx.Command}'",
+                    DeniedTools = new List<string>(ctx.RequestedTools)
+                };
+            }
+
+            if (ctx.RiskScore > MaxRiskByRole.GetValueOrDefault(ctx.Role, 0))
+            {
+                return new AccessDecision
+                {
+                    Allowed = false,
+                    Reason = $"risk score {ctx.RiskScore} exceeds max for role '{ctx.Role}'",
+                    DeniedTools = new List<string>(ctx.RequestedTools)
+                };
+            }
+
+            var allowedTools = new List<string>();
+            var deniedTools = new List<string>();
+
+            foreach (var tool in ctx.RequestedTools)
+            {
+                if (perms.Tools.Contains(tool))
+                    allowedTools.Add(tool);
+                else
+                    deniedTools.Add(tool);
+            }
+
+            return new AccessDecision
+            {
+                Allowed = true,
+                Reason = "access granted",
+                AllowedTools = allowedTools,
+                DeniedTools = deniedTools
+            };
+        }
+    }
+
+    public sealed class RolePermission
+    {
+        public HashSet<string> Commands { get; }
+        public HashSet<string> Tools { get; }
+
+        public RolePermission(IEnumerable<string> commands, IEnumerable<string> tools)
+        {
+            Commands = new HashSet<string>(commands, StringComparer.OrdinalIgnoreCase);
+            Tools = new HashSet<string>(tools, StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    public interface IMistralGateway
+    {
+        Task<MistralChatResponse> CompleteAsync(MistralChatRequest request, CancellationToken cancellationToken = default);
+    }
+
+    public sealed class MistralRestGateway : IMistralGateway
+    {
+        private readonly HttpClient _httpClient;
+        private readonly string _apiKey;
+
+        public MistralRestGateway(HttpClient httpClient, string apiKey)
+        {
+            _httpClient = httpClient;
+            _apiKey = apiKey;
+        }
+
+        public async Task<MistralChatResponse> CompleteAsync(MistralChatRequest request, CancellationToken cancellationToken = default)
+        {
+            using var http = new HttpRequestMessage(HttpMethod.Post, "https://api.mistral.ai/v1/chat/completions");
+            http.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+            http.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+            var json = JsonSerializer.Serialize(request, JsonOptions.Default);
+            http.Content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            using var response = await _httpClient.SendAsync(http, cancellationToken);
+            var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+            response.EnsureSuccessStatusCode();
+
+            var parsed = JsonSerializer.Deserialize<MistralChatResponse>(responseBody, JsonOptions.Default);
+            if (parsed is null)
+                throw new InvalidOperationException("Mistral response deserialized to null.");
+
+            return parsed;
+        }
+    }
+
+    public sealed class MockMistralGateway : IMistralGateway
+    {
+        private readonly string _content;
+
+        public MockMistralGateway(string content = "Mocked response")
+        {
+            _content = content;
+        }
+
+        public Task<MistralChatResponse> CompleteAsync(MistralChatRequest request, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new MistralChatResponse
+            {
+                Choices = new List<MistralChoice>
+                {
+                    new MistralChoice
+                    {
+                        Message = new MistralMessage
+                        {
+                            Role = "assistant",
+                            Content = _content,
+                            ToolCalls = null
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    public sealed class MistralCommandPolicyAio
+    {
+        private readonly IMistralGateway _gateway;
+        private readonly string _model;
+        private readonly CommandPolicy _policy;
+
+        public AsyncEventBus EventBus { get; } = new();
+        public List<WitnessRule> WitnessRules { get; } = new();
+
+        public MistralCommandPolicyAio(IMistralGateway gateway, string model, CommandPolicy? policy = null)
+        {
+            _gateway = gateway;
+            _model = model;
+            _policy = policy ?? new CommandPolicy();
+
+            RegisterDefaultHooks();
+            RegisterDefaultWitnessRules();
+        }
+
+        public void AddWitnessRule(WitnessRule rule) => WitnessRules.Add(rule);
+
+        private void RegisterDefaultHooks()
+        {
+            EventBus.On("access_denied", async args =>
+            {
+                var ctx = (CommandContext)args[0]!;
+                var decision = (AccessDecision)args[1]!;
+                ctx.Log("access_denied", new { decision.Reason, decision.DeniedTools });
+                await Task.CompletedTask;
+            });
+
+            EventBus.On("tool_denied", async args =>
+            {
+                var ctx = (CommandContext)args[0]!;
+                var tool = (string)args[1]!;
+                ctx.Log("tool_denied", new { tool });
+                await Task.CompletedTask;
+            });
+
+            EventBus.On("witness_feedback", async args =>
+            {
+                var ctx = (CommandContext)args[0]!;
+                var feedback = (string)args[1]!;
+                ctx.Log("witness_feedback", new { feedback });
+                await Task.CompletedTask;
+            });
+        }
+
+        private void RegisterDefaultWitnessRules()
+        {
+            AddWitnessRule(new WitnessRule(
+                "high_offense_bonus",
+                ctx => ctx.Strengths.GetValueOrDefault("offense", 0) > 4,
+                ctx =>
+                {
+                    ctx.AddWitnessXp(10);
+                    return Task.CompletedTask;
+                }));
+
+            AddWitnessRule(new WitnessRule(
+                "low_endurance_recovery",
+                ctx => ctx.Weaknesses.GetValueOrDefault("endurance", 999) < 3,
+                ctx =>
+                {
+                    ctx.AdjustAttribute("endurance", 1);
+                    return Task.CompletedTask;
+                }));
+        }
+
+        public async Task<RunResult> RunAsync(
+            string userId,
+            string role,
+            string command,
+            string prompt,
+            List<string> requestedTools,
+            Dictionary<string, int>? strengths = null,
+            Dictionary<string, int>? weaknesses = null,
+            int riskScore = 0,
+            Dictionary<string, object>? metadata = null,
+            CancellationToken cancellationToken = default)
+        {
+            var ctx = new CommandContext
+            {
+                UserId = userId,
+                Role = role,
+                Command = command,
+                Prompt = prompt,
+                RequestedTools = requestedTools ?? new List<string>(),
+                Strengths = strengths ?? new Dictionary<string, int>(),
+                Weaknesses = weaknesses ?? new Dictionary<string, int>(),
+                RiskScore = riskScore,
+                Metadata = metadata ?? new Dictionary<string, object>()
+            };
+
+            var decision = _policy.Decide(ctx);
+
+            Console.WriteLine("Allowed tools: " + string.Join(", ", decision.AllowedTools));
+
+            if (!decision.Allowed)
+            {
+                await EventBus.EmitAsync("access_denied", ctx, decision);
+
+                return new RunResult
+                {
+                    Ok = false,
+                    Allowed = false,
+                    Reason = decision.Reason,
+                    AllowedTools = decision.AllowedTools,
+                    DeniedTools = decision.DeniedTools,
+                    WitnessXp = ctx.WitnessXp,
+                    AuditLog = ctx.AuditLog,
+                    Strengths = ctx.Strengths,
+                    Weaknesses = ctx.Weaknesses
+                };
+            }
+
+            foreach (var deniedTool in decision.DeniedTools)
+                await EventBus.EmitAsync("tool_denied", ctx, deniedTool);
+
+            foreach (var rule in WitnessRules)
+                await rule.CheckAsync(ctx);
+
+            var tools = BuildTools(decision);
+            var messages = new List<MistralMessage>
+            {
+                new MistralMessage
+                {
+                    Role = "system",
+                    Content =
+                        $"You are operating under local command policy. " +
+                        $"Approved command: {ctx.Command}. " +
+                        $"Approved tools: {string.Join(", ", decision.AllowedTools)}. " +
+                        $"Denied tools: {string.Join(", ", decision.DeniedTools)}. " +
+                        $"Do not claim access to denied tools."
+                },
+                new MistralMessage
+                {
+                    Role = "user",
+                    Content = ctx.Prompt
+                }
+            };
+
+            var request = new MistralChatRequest
+            {
+                Model = _model,
+                Messages = messages,
+                ParallelToolCalls = false,
+                Tools = tools.Count > 0 ? tools : null
+            };
+
+            var response = await _gateway.CompleteAsync(request, cancellationToken);
+            var assistantMessage = response.Choices[0].Message;
+
+            if (assistantMessage.ToolCalls is { Count: > 0 })
+            {
+                foreach (var toolCall in assistantMessage.ToolCalls)
+                {
+                    var result = await ExecuteLocalToolAsync(ctx, decision, toolCall);
+                    messages.Add(assistantMessage);
+                    messages.Add(new MistralMessage
+                    {
+                        Role = "tool",
+                        Name = toolCall.Function.Name,
+                        ToolCallId = toolCall.Id,
+                        Content = result
+                    });
+                }
+
+                request.Messages = messages;
+                response = await _gateway.CompleteAsync(request, cancellationToken);
+                assistantMessage = response.Choices[0].Message;
+            }
+
+            return new RunResult
+            {
+                Ok = true,
+                Allowed = true,
+                Reason = decision.Reason,
+                Response = assistantMessage.Content ?? "",
+                AllowedTools = decision.AllowedTools,
+                DeniedTools = decision.DeniedTools,
+                WitnessXp = ctx.WitnessXp,
+                AuditLog = ctx.AuditLog,
+                Strengths = ctx.Strengths,
+                Weaknesses = ctx.Weaknesses
+            };
+        }
+
+        private List<MistralTool> BuildTools(AccessDecision decision)
+        {
+            var tools = new List<MistralTool>();
+
+            if (decision.AllowedTools.Contains("get_policy_snapshot"))
+            {
+                tools.Add(new MistralTool
+                {
+                    Type = "function",
+                    Function = new MistralFunction
+                    {
+                        Name = "get_policy_snapshot",
+                        Description = "Return the current policy snapshot.",
+                        Parameters = JsonDocument.Parse("""
+                        {
+                          "type": "object",
+                          "properties": {}
+                        }
+                        """).RootElement
+                    }
+                });
+            }
+
+            if (decision.AllowedTools.Contains("log_witness_feedback"))
+            {
+                tools.Add(new MistralTool
+                {
+                    Type = "function",
+                    Function = new MistralFunction
+                    {
+                        Name = "log_witness_feedback",
+                        Description = "Record witness feedback.",
+                        Parameters = JsonDocument.Parse("""
+                        {
+                          "type": "object",
+                          "properties": {
+                            "feedback": {
+                              "type": "string"
+                            }
+                          },
+                          "required": ["feedback"]
+                        }
+                        """).RootElement
+                    }
+                });
+            }
+
+            if (decision.AllowedTools.Contains("custom_analyzer"))
+            {
+                tools.Add(new MistralTool
+                {
+                    Type = "function",
+                    Function = new MistralFunction
+                    {
+                        Name = "custom_analyzer",
+                        Description = "Run a custom local analysis tool.",
+                        Parameters = JsonDocument.Parse("""
+                        {
+                          "type": "object",
+                          "properties": {
+                            "dataset_name": {
+                              "type": "string"
+                            }
+                          },
+                          "required": ["dataset_name"]
+                        }
+                        """).RootElement
+                    }
+                });
+            }
+
+            return tools;
+        }
+
+        private async Task<string> ExecuteLocalToolAsync(
+            CommandContext ctx,
+            AccessDecision decision,
+            MistralToolCall toolCall)
+        {
+            var name = toolCall.Function.Name;
+            var argsJson = toolCall.Function.Arguments ?? "{}";
+
+            if (!decision.AllowedTools.Contains(name))
+            {
+                await EventBus.EmitAsync("tool_denied", ctx, name);
+                return JsonSerializer.Serialize(new { ok = false, error = "tool denied by policy" });
+            }
+
+            if (name == "get_policy_snapshot")
+            {
+                return JsonSerializer.Serialize(new
+                {
+                    role = ctx.Role,
+                    command = ctx.Command,
+                    risk = ctx.RiskScore,
+                    witnessXp = ctx.WitnessXp,
+                    strengths = ctx.Strengths,
+                    weaknesses = ctx.Weaknesses
+                });
+            }
+
+            if (name == "log_witness_feedback")
+            {
+                using var doc = JsonDocument.Parse(argsJson);
+                var feedback = doc.RootElement.TryGetProperty("feedback", out var node)
+                    ? node.GetString() ?? ""
+                    : "";
+
+                await EventBus.EmitAsync("witness_feedback", ctx, feedback);
+                return JsonSerializer.Serialize(new { ok = true, feedbackLogged = feedback });
+            }
+
+            if (name == "custom_analyzer")
+            {
+                using var doc = JsonDocument.Parse(argsJson);
+                var dataset = doc.RootElement.TryGetProperty("dataset_name", out var node)
+                    ? node.GetString() ?? "unknown"
+                    : "unknown";
+
+                return JsonSerializer.Serialize(new
+                {
+                    result = "analysis_complete",
+                    dataset_name = dataset
+                });
+            }
+
+            return JsonSerializer.Serialize(new { ok = false, error = "unknown tool" });
+        }
+    }
+
+    public static class SqliteAudit
+    {
+        public static void EnsureSchema(string connectionString)
+        {
+            using var conn = new SqliteConnection(connectionString);
+            conn.Open();
+
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+            CREATE TABLE IF NOT EXISTS logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                user_id TEXT NOT NULL,
+                event TEXT NOT NULL,
+                details TEXT NOT NULL
+            );
+            """;
+            cmd.ExecuteNonQuery();
+        }
+
+        public static async Task LogWitnessFeedbackAsync(object?[] args, string connectionString)
+        {
+            var ctx = (CommandContext)args[0]!;
+            var feedback = (string)args[1]!;
+
+            await using var conn = new SqliteConnection(connectionString);
+            await conn.OpenAsync();
+
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+            INSERT INTO logs (ts, user_id, event, details)
+            VALUES ($ts, $user_id, $event, $details);
+            """;
+
+            cmd.Parameters.AddWithValue("$ts", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            cmd.Parameters.AddWithValue("$user_id", ctx.UserId);
+            cmd.Parameters.AddWithValue("$event", "witness_feedback");
+            cmd.Parameters.AddWithValue("$details", JsonSerializer.Serialize(new { feedback }));
+
+            await cmd.ExecuteNonQueryAsync();
+        }
+    }
+
+    public sealed class RunResult
+    {
+        public bool Ok { get; set; }
+        public bool Allowed { get; set; }
+        public string Reason { get; set; } = "";
+        public string Response { get; set; } = "";
+        public List<string> AllowedTools { get; set; } = new();
+        public List<string> DeniedTools { get; set; } = new();
+        public int WitnessXp { get; set; }
+        public List<AuditRecord> AuditLog { get; set; } = new();
+        public Dictionary<string, int> Strengths { get; set; } = new();
+        public Dictionary<string, int> Weaknesses { get; set; } = new();
+    }
+
+    public sealed class MistralChatRequest
+    {
+        [JsonPropertyName("model")]
+        public string Model { get; set; } = "";
+
+        [JsonPropertyName("messages")]
+        public List<MistralMessage> Messages { get; set; } = new();
+
+        [JsonPropertyName("tools")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public List<MistralTool>? Tools { get; set; }
+
+        [JsonPropertyName("parallel_tool_calls")]
+        public bool ParallelToolCalls { get; set; } = false;
+    }
+
+    public sealed class MistralChatResponse
+    {
+        [JsonPropertyName("choices")]
+        public List<MistralChoice> Choices { get; set; } = new();
+    }
+
+    public sealed class MistralChoice
+    {
+        [JsonPropertyName("message")]
+        public MistralMessage Message { get; set; } = new();
+    }
+
+    public sealed class MistralMessage
+    {
+        [JsonPropertyName("role")]
+        public string Role { get; set; } = "";
+
+        [JsonPropertyName("content")]
+        public string? Content { get; set; }
+
+        [JsonPropertyName("name")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? Name { get; set; }
+
+        [JsonPropertyName("tool_call_id")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? ToolCallId { get; set; }
+
+        [JsonPropertyName("tool_calls")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public List<MistralToolCall>? ToolCalls { get; set; }
+    }
+
+    public sealed class MistralTool
+    {
+        [JsonPropertyName("type")]
+        public string Type { get; set; } = "function";
+
+        [JsonPropertyName("function")]
+        public MistralFunction Function { get; set; } = new();
+    }
+
+    public sealed class MistralFunction
+    {
+        [JsonPropertyName("name")]
+        public string Name { get; set; } = "";
+
+        [JsonPropertyName("description")]
+        public string Description { get; set; } = "";
+
+        [JsonPropertyName("parameters")]
+        public JsonElement Parameters { get; set; }
+    }
+
+    public sealed class MistralToolCall
+    {
+        [JsonPropertyName("id")]
+        public string Id { get; set; } = "";
+
+        [JsonPropertyName("function")]
+        public MistralToolCallFunction Function { get; set; } = new();
+    }
+
+    public sealed class MistralToolCallFunction
+    {
+        [JsonPropertyName("name")]
+        public string Name { get; set; } = "";
+
+        [JsonPropertyName("arguments")]
+        public string? Arguments { get; set; }
+    }
+
+    public static class JsonOptions
+    {
+        public static readonly JsonSerializerOptions Default = new()
+        {
+            PropertyNamingPolicy = null,
+            WriteIndented = true
+        };
+    }
+
+    public static class Program
+    {
+        public static async Task Main()
+        {
+            var connectionString = "Data Source=audit_logs.db";
+            SqliteAudit.EnsureSchema(connectionString);
+
+            var useMock = true;
+
+            IMistralGateway gateway = useMock
+                ? new MockMistralGateway("Mocked response")
+                : new MistralRestGateway(
+                    new HttpClient(),
+                    Environment.GetEnvironmentVariable("MISTRAL_API_KEY")
+                        ?? throw new InvalidOperationException("MISTRAL_API_KEY is not set."));
+
+            var aio = new MistralCommandPolicyAio(gateway, "mistral-medium-latest");
+
+            aio.AddWitnessRule(new WitnessRule(
+                "precision_mastery",
+                ctx => ctx.Strengths.GetValueOrDefault("precision", 0) > 6,
+                ctx =>
+                {
+                    ctx.AddWitnessXp(15);
+                    ctx.Log("witness_feedback", new { feedback = "Precision mastery unlocked! +15 XP" });
+                    return Task.CompletedTask;
+                }));
+
+            aio.AddWitnessRule(new WitnessRule(
+                "endurance_warning",
+                ctx => ctx.Weaknesses.GetValueOrDefault("endurance", 0) > 5,
+                async ctx =>
+                {
+                    await aio.EventBus.EmitAsync("witness_feedback", ctx, "Warning: Endurance critically low!");
+                }));
+
+            aio.EventBus.On("witness_feedback", args => SqliteAudit.LogWitnessFeedbackAsync(args, connectionString));
+
+            aio.EventBus.On("access_denied", async args =>
+            {
+                var ctx = (CommandContext)args[0]!;
+                var decision = (AccessDecision)args[1]!;
+                Console.WriteLine($"Monitoring: access_denied - user={ctx.UserId} reason={decision.Reason}");
+                await Task.CompletedTask;
+            });
+
+            aio.EventBus.On("tool_denied", async args =>
+            {
+                var ctx = (CommandContext)args[0]!;
+                var tool = (string)args[1]!;
+                Console.WriteLine($"Monitoring: tool_denied - user={ctx.UserId} tool={tool}");
+                await Task.CompletedTask;
+            });
+
+            var result = await aio.RunAsync(
+                userId: "operator_01",
+                role: "operator",
+                command: "analyze",
+                prompt: "Analyze this dataset for anomalies.",
+                requestedTools: new List<string>
+                {
+                    "get_policy_snapshot",
+                    "log_witness_feedback",
+                    "custom_analyzer",
+                    "run_shell"
+                },
+                strengths: new Dictionary<string, int>
+                {
+                    ["offense"] = 3,
+                    ["precision"] = 7
+                },
+                weaknesses: new Dictionary<string, int>
+                {
+                    ["endurance"] = 6
+                },
+                riskScore: 2,
+                metadata: new Dictionary<string, object>
+                {
+                    ["urgent"] = true
+                });
+
+            Console.WriteLine(JsonSerializer.Serialize(result, JsonOptions.Default));
+        }
+    }
+}
