@@ -1,0 +1,15 @@
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class QuadAttributeSet
+{
+    [Required] public string A1Name { get; set; } = "";
+    [Required] public object? A1Value { get; set; }
+
+    [Required] public string A2Name { get; set; } = "";
+    [Required] public object? A2Value { get; set; }
+
+    [Required] public string A3Name { get; set; } = "";
+    [Required] public object? A3Value { get; set; }
+
+    [Required] public string A4Name { get; set; } = "";
+    [Required] public object? A4Value { get; set; }
+}
