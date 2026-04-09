@@ -1,0 +1,35 @@
+class WitnessHook:
+    def __init__(self, trigger_condition, action):
+        self.trigger_condition = trigger_condition  # e.g., "strength_used > 3"
+        self.action = action  # e.g., "log feedback" or "adjust weakness"
+
+    def check(self, martial_state):
+        if self.trigger_condition(martial_state):
+            self.action(martial_state)
+
+    class QUOMartialSet:
+    def __init__(self, strengths, weaknesses):
+        self.strengths = {k: v for k, v in strengths.items()}  # e.g., {"offense": 5, "speed": 3}
+        self.weaknesses = {k: v for k, v in weaknesses.items()}  # e.g., {"endurance": 2, "predictability": 4}
+        self.witness_xp = 0
+        self.witness_hooks = []
+
+    def add_witness_hook(self, hook):
+        self.witness_hooks.append(hook)
+
+    def perform_action(self, action_name):
+        # Simulate using a strength or exposing a weakness
+        print(f"Performing {action_name}...")
+        for hook in self.witness_hooks:
+            hook.check(self)
+
+    def log_witness_xp(self, xp):
+        self.witness_xp += xp
+        print(f"Witness XP gained: {xp}. Total: {self.witness_xp}")
+
+    def adjust_attribute(self, attribute, value):
+        if attribute in self.strengths:
+            self.strengths[attribute] += value
+        elif attribute in self.weaknesses:
+            self.weaknesses[attribute] += value
+        print(f"Adjusted {attribute} by {value}.")
