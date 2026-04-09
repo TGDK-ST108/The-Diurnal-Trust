@@ -1,0 +1,59 @@
+using System.Security.Cryptography;
+using System.Text;
+
+public enum OverwriteDisposition
+{
+    Pending,
+    Approved,
+    Denied,
+    Executed,
+    Blocked,
+    FraudSuspected,
+    FraudConfirmed,
+    RolledBack
+}
+
+public sealed class OverwriteTarget
+{
+    public string EntityType { get; set; } = "";
+    public string EntityId { get; set; } = "";
+    public long ExpectedVersion { get; set; }
+    public string CurrentHash { get; set; } = "";
+}
+
+public sealed class JdoxDuoOverwriteRequest
+{
+    public string RequestId { get; set; } = Guid.NewGuid().ToString("N");
+    public string RequestedBy { get; set; } = "";
+    public string OperatorId { get; set; } = "";
+    public string LegalBasis { get; set; } = "";
+    public string PolicyBasis { get; set; } = "";
+    public string Reason { get; set; } = "";
+    public string Scope { get; set; } = "";
+    public DateTimeOffset RequestedUtc { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset ExpiresUtc { get; set; }
+    public OverwriteTarget Target { get; set; } = new();
+    public string ProposedPayloadJson { get; set; } = "{}";
+    public string PayloadHash { get; set; } = "";
+    public string ClientSignature { get; set; } = "";
+    public string Nonce { get; set; } = "";
+    public List<JdoxApproval> Approvals { get; set; } = new();
+    public OverwriteDisposition Disposition { get; set; } = OverwriteDisposition.Pending;
+}
+
+public sealed class JdoxApproval
+{
+    public string ApproverId { get; set; } = "";
+    public string Role { get; set; } = "";
+    public bool Approved { get; set; }
+    public string Notes { get; set; } = "";
+    public DateTimeOffset ActionUtc { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class FraudAssessment
+{
+    public bool Allowed { get; set; }
+    public bool Suspicious { get; set; }
+    public bool Fraudulent { get; set; }
+    public List<string> Reasons { get; set; } = new();
+}
