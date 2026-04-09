@@ -1,0 +1,32 @@
+import { Mistral } from "@mistralai/mistralai";
+import { HTTPClient } from "@mistralai/mistralai/lib/http";
+
+const httpClient = new HTTPClient();
+
+httpClient.addHook("beforeRequest", (request) => {
+  const nextRequest = new Request(request, {
+    signal: request.signal || AbortSignal.timeout(5000),
+  });
+  nextRequest.headers.set("x-mistral-hook", "active");
+  return nextRequest;
+});
+
+httpClient.addHook("requestError", (error, request) => {
+  console.error("Mistral request failed:", {
+    reason: String(error),
+    endpoint: `${request.method} ${request.url}`,
+  });
+});
+
+const sdk = new Mistral({
+  apiKey: process.env.MISTRAL_API_KEY ?? "",
+  httpClient,
+});
+
+// example call
+const result = await sdk.chat.complete({
+  model: "mistral-small-latest",
+  messages: [{ role: "user", content: "Hook check" }],
+});
+
+console.log(result);
