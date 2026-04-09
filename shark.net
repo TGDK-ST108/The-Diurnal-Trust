@@ -1,0 +1,317 @@
+import os
+import json
+import hashlib
+from dataclasses import dataclass, field, asdict
+from typing import List, Dict, Any, Optional
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+from openai import OpenAI
+
+
+# ============================================================
+# STALDWELL META ADAPTER
+# Phone-side companion backend for Oakley Meta / Ray-Ban Meta
+# ============================================================
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise RuntimeError("Set OPENAI_API_KEY in your environment.")
+
+client = OpenAI(api_key=OPENAI_API_KEY)
+app = FastAPI(title="Staldwell Meta Adapter", version="0.1.0")
+
+
+# -----------------------------
+# Data models
+# -----------------------------
+
+@dataclass
+class StaldwellContext:
+    query: str
+    state: str
+    target: str
+    procedure: List[str] = field(default_factory=list)
+    assets: List[str] = field(default_factory=list)
+    constraints: List[str] = field(default_factory=list)
+    risks: List[str] = field(default_factory=list)
+    signals: List[str] = field(default_factory=list)
+    window: str = "unspecified"
+    mode: str = "general"
+    policy: str = "ColdSmart"
+
+    def to_context_line(self) -> str:
+        payload = {
+            "MODE": self.mode,
+            "QUERY": self.query,
+            "STATE": self.state,
+            "TARGET": self.target,
+            "PROCEDURE": self.procedure,
+            "ASSETS": self.assets,
+            "CONSTRAINTS": self.constraints,
+            "RISKS": self.risks,
+            "SIGNALS": self.signals,
+            "WINDOW": self.window,
+            "POLICY": self.policy,
+            "RETURN": {
+                "state_assessment": "",
+                "top_paths": [
+                    {
+                        "name": "",
+                        "procedure": [],
+                        "probability": 0.0,
+                        "risk": "",
+                        "cost": "",
+                        "time_to_result": "",
+                        "reason": ""
+                    }
+                ],
+                "best_path": {
+                    "name": "",
+                    "reason": "",
+                    "procedure": [],
+                    "confidence_band": ""
+                },
+                "failure_triggers": [],
+                "fallback_route": [],
+                "immediate_next_move": "",
+                "speakable_summary": ""
+            }
+        }
+        return "STALDWELL::" + json.dumps(payload, ensure_ascii=False)
+
+
+class GlassesEvent(BaseModel):
+    """
+    Payload the phone companion app sends to the Python adapter.
+    This can be built from voice transcription, image captioning,
+    quick taps, or mobile app UI context.
+    """
+    device_family: str = Field(default="oakley_meta")
+    device_name: Optional[str] = None
+    user_id: str
+    utterance: str
+    state: str = ""
+    target: str = ""
+    mode: str = "general"
+    procedure: List[str] = Field(default_factory=list)
+    assets: List[str] = Field(default_factory=list)
+    constraints: List[str] = Field(default_factory=list)
+    risks: List[str] = Field(default_factory=list)
+    signals: List[str] = Field(default_factory=list)
+    window: str = "unspecified"
+    image_summary: Optional[str] = None
+    location_summary: Optional[str] = None
+    battery_summary: Optional[str] = None
+
+
+class AdapterResponse(BaseModel):
+    ok: bool
+    request_fingerprint: str
+    structured_result: Dict[str, Any]
+    speakable_summary: str
+
+
+# -----------------------------
+# Prompting
+# -----------------------------
+
+SYSTEM_PROMPT = """
+You are Staldwell, a procedural outcome forecasting interface operating under ColdSmart Policy.
+
+Rules:
+- Do not claim certainty.
+- Do not pretend to literally see the future.
+- Convert the user's live context into ranked procedural outcomes.
+- Use current state, target, assets, constraints, risks, signals, and procedure.
+- Prefer concise field-safe answers suitable for wearable readback.
+- Return strict JSON only.
+
+ColdSmart Policy:
+- evidence weighted
+- emotionally neutral
+- procedural
+- risk aware
+- fallback required
+
+Return JSON with this schema:
+{
+  "state_assessment": "string",
+  "top_paths": [
+    {
+      "name": "string",
+      "procedure": ["step 1", "step 2"],
+      "probability": 0.0,
+      "risk": "low|medium|high",
+      "cost": "low|medium|high",
+      "time_to_result": "string",
+      "reason": "string"
+    }
+  ],
+  "best_path": {
+    "name": "string",
+    "reason": "string",
+    "procedure": ["step 1", "step 2"],
+    "confidence_band": "string"
+  },
+  "failure_triggers": ["string"],
+  "fallback_route": ["string"],
+  "immediate_next_move": "string",
+  "speakable_summary": "string"
+}
+""".strip()
+
+
+def build_context_from_event(evt: GlassesEvent) -> StaldwellContext:
+    signals = list(evt.signals)
+
+    if evt.image_summary:
+        signals.append(f"image_summary={evt.image_summary}")
+    if evt.location_summary:
+        signals.append(f"location_summary={evt.location_summary}")
+    if evt.battery_summary:
+        signals.append(f"battery_summary={evt.battery_summary}")
+
+    return StaldwellContext(
+        query=evt.utterance,
+        state=evt.state or "live wearable interaction",
+        target=evt.target or "best procedural outcome",
+        procedure=evt.procedure,
+        assets=evt.assets,
+        constraints=evt.constraints,
+        risks=evt.risks,
+        signals=signals,
+        window=evt.window,
+        mode=evt.mode,
+    )
+
+
+def request_fingerprint(evt: GlassesEvent) -> str:
+    raw = json.dumps(evt.model_dump(), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def run_staldwell(context: StaldwellContext, user_id: str) -> Dict[str, Any]:
+    response = client.responses.create(
+        model="gpt-5.4",
+        instructions=SYSTEM_PROMPT,
+        input=context.to_context_line(),
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "staldwell_result",
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "state_assessment": {"type": "string"},
+                        "top_paths": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "procedure": {
+                                        "type": "array",
+                                        "items": {"type": "string"}
+                                    },
+                                    "probability": {"type": "number"},
+                                    "risk": {"type": "string"},
+                                    "cost": {"type": "string"},
+                                    "time_to_result": {"type": "string"},
+                                    "reason": {"type": "string"}
+                                },
+                                "required": [
+                                    "name",
+                                    "procedure",
+                                    "probability",
+                                    "risk",
+                                    "cost",
+                                    "time_to_result",
+                                    "reason"
+                                ]
+                            }
+                        },
+                        "best_path": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "name": {"type": "string"},
+                                "reason": {"type": "string"},
+                                "procedure": {
+                                    "type": "array",
+                                    "items": {"type": "string"}
+                                },
+                                "confidence_band": {"type": "string"}
+                            },
+                            "required": ["name", "reason", "procedure", "confidence_band"]
+                        },
+                        "failure_triggers": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        },
+                        "fallback_route": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        },
+                        "immediate_next_move": {"type": "string"},
+                        "speakable_summary": {"type": "string"}
+                    },
+                    "required": [
+                        "state_assessment",
+                        "top_paths",
+                        "best_path",
+                        "failure_triggers",
+                        "fallback_route",
+                        "immediate_next_move",
+                        "speakable_summary"
+                    ]
+                }
+            }
+        },
+        safety_identifier=hashlib.sha256(user_id.encode("utf-8")).hexdigest()
+    )
+
+    # SDK convenience property documented for Python SDKs.
+    raw = response.output_text
+    return json.loads(raw)
+
+
+# -----------------------------
+# API endpoints
+# -----------------------------
+
+@app.get("/health")
+def health() -> Dict[str, Any]:
+    return {"ok": True, "service": "staldwell-meta-adapter"}
+
+
+@app.post("/glasses/query", response_model=AdapterResponse)
+def glasses_query(evt: GlassesEvent) -> AdapterResponse:
+    try:
+        ctx = build_context_from_event(evt)
+        result = run_staldwell(ctx, user_id=evt.user_id)
+        return AdapterResponse(
+            ok=True,
+            request_fingerprint=request_fingerprint(evt),
+            structured_result=result,
+            speakable_summary=result.get("speakable_summary", "")
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# -----------------------------
+# Local test helper
+# -----------------------------
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "staldwell_meta_adapter:app",
+        host="0.0.0.0",
+        port=8080,
+        reload=True
+    )
