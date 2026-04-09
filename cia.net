@@ -1,0 +1,189 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace GovernanceVectors
+{
+    public enum ColdurdMode
+    {
+        Open,        // normal bounded execution
+        Throttle,    // slower execution, more review
+        Escalate,    // human review required
+        Freeze       // no autonomous execution
+    }
+
+    public sealed class GovernanceNode
+    {
+        public string NodeId { get; set; } = "";
+        public string Domain { get; set; } = "";
+        public double ReciprocalTrust { get; set; }          // RE5-style trust
+        public double ResidualResentment { get; set; }       // friction debt
+        public double CommodifiedValue { get; set; }         // measurable value
+        public double PolicyIntegrity { get; set; }          // compliance + document validity
+        public double EvidenceIntegrity { get; set; }        // JDOX evidence quality
+        public bool HasMandatoryEvidence { get; set; }
+        public List<string> EvidenceRefs { get; set; } = new();
+    }
+
+    public sealed class GovernanceVector
+    {
+        public string AgentId { get; set; } = "";
+        public string ActionType { get; set; } = "";
+        public string TargetNodeId { get; set; } = "";
+        public double BaseAuthority { get; set; }
+        public double TrustWeight { get; set; }
+        public double ResentmentPenalty { get; set; }
+        public double ValueWeight { get; set; }
+        public double IntegrityWeight { get; set; }
+        public ColdurdMode ColdurdFlag { get; set; } = ColdurdMode.Open;
+        public bool HumanReviewRequired { get; set; }
+        public string Reason { get; set; } = "";
+    }
+
+    public sealed class GovernanceDecision
+    {
+        public bool Allowed { get; set; }
+        public ColdurdMode Mode { get; set; }
+        public double GovernanceScore { get; set; }
+        public string Reason { get; set; } = "";
+    }
+
+    public sealed class GovernanceEngine
+    {
+        public double MinScoreToAllow { get; set; } = 0.55;
+        public double EscalationThreshold { get; set; } = 0.40;
+        public double FreezeThreshold { get; set; } = 0.20;
+        public double ResentmentFreezeThreshold { get; set; } = 0.75;
+
+        public GovernanceDecision Evaluate(GovernanceNode node, GovernanceVector vector)
+        {
+            // Normalize assumptions: expected 0..1
+            double trust = Clamp01(node.ReciprocalTrust) * Clamp01(vector.TrustWeight);
+            double resentment = Clamp01(node.ResidualResentment) * Clamp01(vector.ResentmentPenalty);
+            double value = Clamp01(node.CommodifiedValue) * Clamp01(vector.ValueWeight);
+            double integrity = Clamp01((node.PolicyIntegrity + node.EvidenceIntegrity) / 2.0) * Clamp01(vector.IntegrityWeight);
+            double authority = Clamp01(vector.BaseAuthority);
+
+            // Missing evidence hard penalty
+            double evidencePenalty = node.HasMandatoryEvidence ? 0.0 : 0.35;
+
+            // Governance score
+            double score =
+                (authority * 0.25) +
+                (trust * 0.25) +
+                (value * 0.20) +
+                (integrity * 0.30) -
+                (resentment * 0.40) -
+                evidencePenalty;
+
+            score = Clamp01(score);
+
+            var decision = new GovernanceDecision
+            {
+                GovernanceScore = score,
+                Mode = ColdurdMode.Open,
+                Allowed = false
+            };
+
+            if (node.ResidualResentment >= ResentmentFreezeThreshold)
+            {
+                decision.Mode = ColdurdMode.Freeze;
+                decision.Reason = "Residual resentment exceeded hard-stop threshold.";
+                return decision;
+            }
+
+            if (!node.HasMandatoryEvidence)
+            {
+                decision.Mode = ColdurdMode.Escalate;
+                decision.Reason = "Mandatory evidence missing.";
+                return decision;
+            }
+
+            if (vector.HumanReviewRequired)
+            {
+                decision.Mode = ColdurdMode.Escalate;
+                decision.Reason = "Human review explicitly required by vector.";
+                return decision;
+            }
+
+            if (score <= FreezeThreshold)
+            {
+                decision.Mode = ColdurdMode.Freeze;
+                decision.Reason = "Governance score below freeze threshold.";
+                return decision;
+            }
+
+            if (score <= EscalationThreshold)
+            {
+                decision.Mode = ColdurdMode.Escalate;
+                decision.Reason = "Governance score requires escalation.";
+                return decision;
+            }
+
+            if (score < MinScoreToAllow)
+            {
+                decision.Mode = ColdurdMode.Throttle;
+                decision.Allowed = true;
+                decision.Reason = "Allowed with throttle and increased oversight.";
+                return decision;
+            }
+
+            decision.Mode = ColdurdMode.Open;
+            decision.Allowed = true;
+            decision.Reason = "Allowed under bounded governance.";
+            return decision;
+        }
+
+        private static double Clamp01(double value)
+        {
+            if (value < 0) return 0;
+            if (value > 1) return 1;
+            return value;
+        }
+    }
+
+    public static class Demo
+    {
+        public static void Main()
+        {
+            var node = new GovernanceNode
+            {
+                NodeId = "jde-ap-001",
+                Domain = "JDOX",
+                ReciprocalTrust = 0.82,
+                ResidualResentment = 0.28,
+                CommodifiedValue = 0.76,
+                PolicyIntegrity = 0.91,
+                EvidenceIntegrity = 0.88,
+                HasMandatoryEvidence = true,
+                EvidenceRefs = new List<string>
+                {
+                    "JDOX://policy/ap-approval-v4",
+                    "JDOX://invoice/2026-04-09-4481"
+                }
+            };
+
+            var vector = new GovernanceVector
+            {
+                AgentId = "progentic-agent-07",
+                ActionType = "approve_invoice_match",
+                TargetNodeId = node.NodeId,
+                BaseAuthority = 0.78,
+                TrustWeight = 1.00,
+                ResentmentPenalty = 0.95,
+                ValueWeight = 0.85,
+                IntegrityWeight = 1.00,
+                ColdurdFlag = ColdurdMode.Open,
+                HumanReviewRequired = false
+            };
+
+            var engine = new GovernanceEngine();
+            var decision = engine.Evaluate(node, vector);
+
+            Console.WriteLine($"Allowed: {decision.Allowed}");
+            Console.WriteLine($"Mode: {decision.Mode}");
+            Console.WriteLine($"Score: {decision.GovernanceScore:F3}");
+            Console.WriteLine($"Reason: {decision.Reason}");
+        }
+    }
+}
