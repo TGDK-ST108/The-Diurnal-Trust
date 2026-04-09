@@ -1,0 +1,475 @@
+# mistral_command_policy_aio.py
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from mistralai.client import Mistral
+
+
+Hook = Callable[..., None]
+
+
+class EventBus:
+    def __init__(self, name: str = "event_bus"):
+        self.name = name
+        self._hooks: Dict[str, List[Hook]] = {}
+
+    def on(self, event_type: str, hook: Hook) -> None:
+        self._hooks.setdefault(event_type, []).append(hook)
+
+    def emit(self, event_type: str, *args, **kwargs) -> None:
+        for hook in self._hooks.get(event_type, []):
+            hook(*args, **kwargs)
+
+
+@dataclass
+class CommandContext:
+    user_id: str
+    role: str
+    command: str
+    prompt: str
+    requested_tools: List[str] = field(default_factory=list)
+    strengths: Dict[str, int] = field(default_factory=dict)
+    weaknesses: Dict[str, int] = field(default_factory=dict)
+    risk_score: int = 0
+    witness_xp: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    audit_log: List[Dict[str, Any]] = field(default_factory=list)
+
+    def log(self, event: str, **details: Any) -> None:
+        self.audit_log.append(
+            {
+                "ts": time.time(),
+                "event": event,
+                "details": details,
+            }
+        )
+
+    def add_witness_xp(self, xp: int) -> None:
+        self.witness_xp += xp
+        self.log("witness_xp", delta=xp, total=self.witness_xp)
+
+    def adjust_attribute(self, attribute: str, value: int) -> None:
+        if attribute in self.strengths:
+            self.strengths[attribute] += value
+            self.log("strength_adjusted", attribute=attribute, delta=value, new=self.strengths[attribute])
+            return
+
+        if attribute in self.weaknesses:
+            self.weaknesses[attribute] += value
+            self.log("weakness_adjusted", attribute=attribute, delta=value, new=self.weaknesses[attribute])
+            return
+
+        self.log("attribute_missing", attribute=attribute, attempted_delta=value)
+
+
+@dataclass
+class AccessDecision:
+    allowed: bool
+    reason: str
+    allowed_tools: List[str] = field(default_factory=list)
+    denied_tools: List[str] = field(default_factory=list)
+
+
+@dataclass
+class WitnessRule:
+    name: str
+    trigger_condition: Callable[[CommandContext], bool]
+    action: Callable[[CommandContext], None]
+
+    def check(self, ctx: CommandContext) -> None:
+        if self.trigger_condition(ctx):
+            self.action(ctx)
+            ctx.log("witness_rule_triggered", rule=self.name)
+
+
+class CommandPolicy:
+    def __init__(
+        self,
+        role_permissions: Optional[Dict[str, Dict[str, List[str]]]] = None,
+        blocked_commands: Optional[List[str]] = None,
+        max_risk_by_role: Optional[Dict[str, int]] = None,
+    ):
+        self.role_permissions = role_permissions or {
+            "viewer": {
+                "commands": ["summarize", "explain", "classify"],
+                "tools": ["get_policy_snapshot"],
+            },
+            "operator": {
+                "commands": ["summarize", "explain", "classify", "analyze", "draft"],
+                "tools": ["get_policy_snapshot", "log_witness_feedback"],
+            },
+            "admin": {
+                "commands": ["*"],
+                "tools": ["get_policy_snapshot", "log_witness_feedback"],
+            },
+        }
+        self.blocked_commands = set(blocked_commands or ["delete_data", "run_shell", "rotate_secrets"])
+        self.max_risk_by_role = max_risk_by_role or {
+            "viewer": 1,
+            "operator": 3,
+            "admin": 5,
+        }
+
+    def decide(self, ctx: CommandContext) -> AccessDecision:
+        if ctx.command in self.blocked_commands:
+            return AccessDecision(
+                allowed=False,
+                reason=f"command '{ctx.command}' is hard-blocked by policy",
+                denied_tools=list(ctx.requested_tools),
+            )
+
+        perms = self.role_permissions.get(ctx.role)
+        if not perms:
+            return AccessDecision(
+                allowed=False,
+                reason=f"unknown role '{ctx.role}'",
+                denied_tools=list(ctx.requested_tools),
+            )
+
+        allowed_commands = perms.get("commands", [])
+        if "*" not in allowed_commands and ctx.command not in allowed_commands:
+            return AccessDecision(
+                allowed=False,
+                reason=f"role '{ctx.role}' is not permitted to run command '{ctx.command}'",
+                denied_tools=list(ctx.requested_tools),
+            )
+
+        max_risk = self.max_risk_by_role.get(ctx.role, 0)
+        if ctx.risk_score > max_risk:
+            return AccessDecision(
+                allowed=False,
+                reason=f"risk score {ctx.risk_score} exceeds max {max_risk} for role '{ctx.role}'",
+                denied_tools=list(ctx.requested_tools),
+            )
+
+        allowed_tool_set = set(perms.get("tools", []))
+        allowed_tools = [tool for tool in ctx.requested_tools if tool in allowed_tool_set]
+        denied_tools = [tool for tool in ctx.requested_tools if tool not in allowed_tool_set]
+
+        return AccessDecision(
+            allowed=True,
+            reason="access granted",
+            allowed_tools=allowed_tools,
+            denied_tools=denied_tools,
+        )
+
+
+class MistralCommandPolicyAIO:
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "mistral-medium-latest",
+        policy: Optional[CommandPolicy] = None,
+    ):
+        self.client = Mistral(api_key=api_key)
+        self.model = model
+        self.policy = policy or CommandPolicy()
+        self.event_bus = EventBus("mistral_command_policy")
+        self.witness_rules: List[WitnessRule] = []
+        self._register_default_hooks()
+        self._register_default_rules()
+
+    def _register_default_hooks(self) -> None:
+        self.event_bus.on(
+            "access_granted",
+            lambda ctx, decision: ctx.log(
+                "access_granted",
+                reason=decision.reason,
+                allowed_tools=decision.allowed_tools,
+                denied_tools=decision.denied_tools,
+            ),
+        )
+
+        self.event_bus.on(
+            "access_denied",
+            lambda ctx, decision: ctx.log(
+                "access_denied",
+                reason=decision.reason,
+                denied_tools=decision.denied_tools,
+            ),
+        )
+
+        self.event_bus.on(
+            "tool_denied",
+            lambda ctx, tool: ctx.log("tool_denied", tool=tool),
+        )
+
+        self.event_bus.on(
+            "witness_feedback",
+            lambda ctx, feedback: ctx.log("witness_feedback", feedback=feedback),
+        )
+
+        self.event_bus.on(
+            "response_received",
+            lambda ctx, text: ctx.log("response_received", chars=len(text or "")),
+        )
+
+    def _register_default_rules(self) -> None:
+        # Keeps the spirit of your original martial/witness logic.
+        self.add_witness_rule(
+            WitnessRule(
+                name="high_offense_bonus",
+                trigger_condition=lambda ctx: ctx.strengths.get("offense", 0) > 4,
+                action=lambda ctx: ctx.add_witness_xp(10),
+            )
+        )
+
+        self.add_witness_rule(
+            WitnessRule(
+                name="low_endurance_recovery",
+                trigger_condition=lambda ctx: ctx.weaknesses.get("endurance", 999) < 3,
+                action=lambda ctx: ctx.adjust_attribute("endurance", 1),
+            )
+        )
+
+    def add_witness_rule(self, rule: WitnessRule) -> None:
+        self.witness_rules.append(rule)
+
+    def request_access(
+        self,
+        *,
+        user_id: str,
+        role: str,
+        command: str,
+        prompt: str,
+        requested_tools: Optional[List[str]] = None,
+        strengths: Optional[Dict[str, int]] = None,
+        weaknesses: Optional[Dict[str, int]] = None,
+        risk_score: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[CommandContext, AccessDecision]:
+        ctx = CommandContext(
+            user_id=user_id,
+            role=role,
+            command=command,
+            prompt=prompt,
+            requested_tools=requested_tools or [],
+            strengths=strengths or {},
+            weaknesses=weaknesses or {},
+            risk_score=risk_score,
+            metadata=metadata or {},
+        )
+
+        decision = self.policy.decide(ctx)
+
+        if decision.allowed:
+            self.event_bus.emit("access_granted", ctx, decision)
+            for denied_tool in decision.denied_tools:
+                self.event_bus.emit("tool_denied", ctx, denied_tool)
+        else:
+            self.event_bus.emit("access_denied", ctx, decision)
+
+        for rule in self.witness_rules:
+            rule.check(ctx)
+
+        return ctx, decision
+
+    def _build_system_prompt(self, ctx: CommandContext, decision: AccessDecision) -> str:
+        return (
+            "You are operating under a local command policy.\n"
+            f"User role: {ctx.role}\n"
+            f"Approved command: {ctx.command}\n"
+            f"Approved tools: {decision.allowed_tools}\n"
+            f"Denied tools: {decision.denied_tools}\n"
+            "Rules:\n"
+            "- Do not claim access to denied tools.\n"
+            "- Stay inside the approved command scope.\n"
+            "- If a requested capability is not approved, say so.\n"
+            "- Prefer concise, auditable answers.\n"
+        )
+
+    def _build_tool_registry(
+        self,
+        ctx: CommandContext,
+        decision: AccessDecision,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Callable[..., str]]]:
+        tools: List[Dict[str, Any]] = []
+        registry: Dict[str, Callable[..., str]] = {}
+
+        if "get_policy_snapshot" in decision.allowed_tools:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_policy_snapshot",
+                        "description": "Return the current local command policy snapshot for this request.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    },
+                }
+            )
+
+            def get_policy_snapshot() -> str:
+                return json.dumps(
+                    {
+                        "role": ctx.role,
+                        "command": ctx.command,
+                        "allowed_tools": decision.allowed_tools,
+                        "denied_tools": decision.denied_tools,
+                        "risk_score": ctx.risk_score,
+                        "witness_xp": ctx.witness_xp,
+                    }
+                )
+
+            registry["get_policy_snapshot"] = get_policy_snapshot
+
+        if "log_witness_feedback" in decision.allowed_tools:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "log_witness_feedback",
+                        "description": "Record witness feedback into the audit trail.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "feedback": {
+                                    "type": "string",
+                                    "description": "Short feedback string to record."
+                                }
+                            },
+                            "required": ["feedback"],
+                        },
+                    },
+                }
+            )
+
+            def log_witness_feedback(feedback: str) -> str:
+                self.event_bus.emit("witness_feedback", ctx, feedback)
+                return json.dumps({"ok": True, "feedback_logged": feedback})
+
+            registry["log_witness_feedback"] = log_witness_feedback
+
+        return tools, registry
+
+    def run(
+        self,
+        *,
+        user_id: str,
+        role: str,
+        command: str,
+        prompt: str,
+        requested_tools: Optional[List[str]] = None,
+        strengths: Optional[Dict[str, int]] = None,
+        weaknesses: Optional[Dict[str, int]] = None,
+        risk_score: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        ctx, decision = self.request_access(
+            user_id=user_id,
+            role=role,
+            command=command,
+            prompt=prompt,
+            requested_tools=requested_tools,
+            strengths=strengths,
+            weaknesses=weaknesses,
+            risk_score=risk_score,
+            metadata=metadata,
+        )
+
+        if not decision.allowed:
+            return {
+                "ok": False,
+                "allowed": False,
+                "reason": decision.reason,
+                "audit_log": ctx.audit_log,
+                "witness_xp": ctx.witness_xp,
+            }
+
+        system_prompt = self._build_system_prompt(ctx, decision)
+        tool_specs, tool_registry = self._build_tool_registry(ctx, decision)
+
+        messages: List[Any] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+
+        call_kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+        }
+
+        if tool_specs:
+            call_kwargs["tools"] = tool_specs
+            call_kwargs["tool_choice"] = "auto"
+            call_kwargs["parallel_tool_calls"] = False
+
+        response = self.client.chat.complete(**call_kwargs)
+        messages.append(response.choices[0].message)
+
+        while getattr(response.choices[0].message, "tool_calls", None):
+            for tool_call in response.choices[0].message.tool_calls:
+                fn_name = tool_call.function.name
+                fn_args = json.loads(tool_call.function.arguments or "{}")
+
+                if fn_name not in tool_registry:
+                    tool_result = json.dumps(
+                        {"ok": False, "error": f"tool '{fn_name}' is not allowed or not registered"}
+                    )
+                else:
+                    tool_result = tool_registry[fn_name](**fn_args)
+
+                messages.append(
+                    {
+                        "role": "tool",
+                        "name": fn_name,
+                        "content": tool_result,
+                        "tool_call_id": tool_call.id,
+                    }
+                )
+
+            response = self.client.chat.complete(
+                model=self.model,
+                messages=messages,
+                tools=tool_specs,
+                tool_choice="auto",
+                parallel_tool_calls=False,
+            )
+            messages.append(response.choices[0].message)
+
+        final_text = response.choices[0].message.content or ""
+        self.event_bus.emit("response_received", ctx, final_text)
+
+        return {
+            "ok": True,
+            "allowed": True,
+            "reason": decision.reason,
+            "response": final_text,
+            "allowed_tools": decision.allowed_tools,
+            "denied_tools": decision.denied_tools,
+            "witness_xp": ctx.witness_xp,
+            "audit_log": ctx.audit_log,
+            "strengths": ctx.strengths,
+            "weaknesses": ctx.weaknesses,
+        }
+
+
+if __name__ == "__main__":
+    api_key = os.environ["MISTRAL_API_KEY"]
+
+    aio = MistralCommandPolicyAIO(
+        api_key=api_key,
+        model="mistral-medium-latest",
+    )
+
+    result = aio.run(
+        user_id="operator_01",
+        role="operator",
+        command="analyze",
+        prompt="Analyze this request and stay inside operator policy.",
+        requested_tools=["get_policy_snapshot", "log_witness_feedback", "run_shell"],
+        strengths={"offense": 5, "speed": 3, "precision": 4},
+        weaknesses={"endurance": 2, "predictability": 4},
+        risk_score=2,
+        metadata={"channel": "policy_test"},
+    )
+
+    print(json.dumps(result, indent=2))
