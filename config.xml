@@ -1,0 +1,6 @@
+<configuration>
+  <appSettings>
+    <add key="CONCORDIA_HMAC_KEY" value="replace-with-long-random-hmac-key" />
+    <add key="CONCORDIA_AES_KEY" value="replace-with-long-random-aes-key" />
+  </appSettings>
+</configuration>
