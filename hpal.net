@@ -1,0 +1,580 @@
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace SectorVectorProtocol144;
+
+public enum VectorPriority
+{
+    Low,
+    Normal,
+    High,
+    Critical
+}
+
+public enum ProtocolDisposition
+{
+    Accepted,
+    Rejected,
+    Blocked,
+    Routed,
+    Completed,
+    Failed
+}
+
+public readonly record struct SectorAddress(int Row, int Column)
+{
+    public const int Size = 12;
+
+    public bool IsValid => Row >= 0 && Row < Size && Column >= 0 && Column < Size;
+    public int Index => (Row * Size) + Column;
+
+    public static SectorAddress FromIndex(int index)
+    {
+        if (index < 0 || index >= Size * Size)
+            throw new ArgumentOutOfRangeException(nameof(index));
+
+        return new SectorAddress(index / Size, index % Size);
+    }
+
+    public override string ToString() => $"S[{Row:D2},{Column:D2}]#{Index:D3}";
+}
+
+public readonly record struct VectorDelta(int DeltaRow, int DeltaColumn)
+{
+    public static VectorDelta Between(SectorAddress source, SectorAddress target) =>
+        new(target.Row - source.Row, target.Column - source.Column);
+
+    public int Manhattan => Math.Abs(DeltaRow) + Math.Abs(DeltaColumn);
+    public double Euclidean => Math.Sqrt((DeltaRow * DeltaRow) + (DeltaColumn * DeltaColumn));
+
+    public string Axis =>
+        DeltaRow == 0 && DeltaColumn == 0 ? "static" :
+        DeltaRow == 0 ? "horizontal" :
+        DeltaColumn == 0 ? "vertical" :
+        "diagonal";
+
+    public override string ToString() =>
+        $"Δ(r:{DeltaRow}, c:{DeltaColumn}) | {Axis} | M={Manhattan} | E={Euclidean:F2}";
+}
+
+public sealed class VectorCommand
+{
+    public string CommandId { get; init; } = Guid.NewGuid().ToString("N");
+    public string Role { get; init; } = "operator";
+    public string Verb { get; init; } = "PING";
+    public SectorAddress Source { get; init; }
+    public SectorAddress Target { get; init; }
+    public VectorPriority Priority { get; init; } = VectorPriority.Normal;
+    public double TrustScore { get; init; } = 1.0;
+    public Dictionary<string, object?> Payload { get; init; } = new();
+    public Dictionary<string, string> Metadata { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public VectorDelta Delta => VectorDelta.Between(Source, Target);
+}
+
+public sealed class SectorState
+{
+    public SectorAddress Address { get; init; }
+    public string Label { get; set; } = "";
+    public bool Enabled { get; set; } = true;
+    public double TrustFloor { get; set; } = 0.0;
+    public HashSet<string> Tags { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public override string ToString() => $"{Address} | {Label} | Enabled={Enabled} | TrustFloor={TrustFloor:F2}";
+}
+
+public sealed class PolicyDecision
+{
+    public bool Allowed { get; init; }
+    public string Reason { get; init; } = "";
+}
+
+public sealed class ProtocolAuditEvent
+{
+    public DateTimeOffset Timestamp { get; init; }
+    public string CommandId { get; init; } = "";
+    public string Stage { get; init; } = "";
+    public string Message { get; init; } = "";
+    public object? Data { get; init; }
+}
+
+public sealed class CommandResult
+{
+    public ProtocolDisposition Disposition { get; set; }
+    public string Message { get; set; } = "";
+    public Dictionary<string, object?> Data { get; set; } = new();
+    public List<ProtocolAuditEvent> AuditTrail { get; set; } = new();
+
+    public static CommandResult Completed(string message, Dictionary<string, object?>? data = null) =>
+        new()
+        {
+            Disposition = ProtocolDisposition.Completed,
+            Message = message,
+            Data = data ?? new Dictionary<string, object?>()
+        };
+
+    public static CommandResult Routed(string message, Dictionary<string, object?>? data = null) =>
+        new()
+        {
+            Disposition = ProtocolDisposition.Routed,
+            Message = message,
+            Data = data ?? new Dictionary<string, object?>()
+        };
+
+    public static CommandResult Rejected(string message, Dictionary<string, object?>? data = null) =>
+        new()
+        {
+            Disposition = ProtocolDisposition.Rejected,
+            Message = message,
+            Data = data ?? new Dictionary<string, object?>()
+        };
+
+    public static CommandResult Blocked(string message, Dictionary<string, object?>? data = null) =>
+        new()
+        {
+            Disposition = ProtocolDisposition.Blocked,
+            Message = message,
+            Data = data ?? new Dictionary<string, object?>()
+        };
+
+    public static CommandResult Failed(string message, Dictionary<string, object?>? data = null) =>
+        new()
+        {
+            Disposition = ProtocolDisposition.Failed,
+            Message = message,
+            Data = data ?? new Dictionary<string, object?>()
+        };
+}
+
+public sealed class ProtocolContext
+{
+    public ProtocolContext(VectorCommand command, SectorState targetSector, PolicyDecision policyDecision)
+    {
+        Command = command;
+        TargetSector = targetSector;
+        PolicyDecision = policyDecision;
+    }
+
+    public VectorCommand Command { get; }
+    public SectorState TargetSector { get; }
+    public PolicyDecision PolicyDecision { get; }
+    public List<ProtocolAuditEvent> AuditTrail { get; } = new();
+
+    public void Audit(string stage, string message, object? data = null)
+    {
+        AuditTrail.Add(new ProtocolAuditEvent
+        {
+            Timestamp = DateTimeOffset.UtcNow,
+            CommandId = Command.CommandId,
+            Stage = stage,
+            Message = message,
+            Data = data
+        });
+    }
+}
+
+public interface ICommandHandler
+{
+    string Name { get; }
+    bool CanHandle(VectorCommand command);
+    ValueTask<CommandResult> HandleAsync(ProtocolContext context, CancellationToken cancellationToken);
+}
+
+public sealed class VectorProtocolPolicy
+{
+    public HashSet<string> BlockedVerbs { get; } = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "DELETE",
+        "PURGE",
+        "OVERWRITE_ROOT"
+    };
+
+    public HashSet<int> BlockedTargetSectors { get; } = new();
+
+    public Dictionary<VectorPriority, double> MinTrustByPriority { get; } = new()
+    {
+        [VectorPriority.Low] = 0.10,
+        [VectorPriority.Normal] = 0.30,
+        [VectorPriority.High] = 0.60,
+        [VectorPriority.Critical] = 0.85
+    };
+
+    public Dictionary<string, HashSet<string>> AllowedVerbsByRole { get; } =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["viewer"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "PING", "STATUS", "QUERY" },
+            ["operator"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "PING", "STATUS", "QUERY", "VECTOR", "ROUTE", "PATCH" },
+            ["admin"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "*" }
+        };
+
+    public PolicyDecision Evaluate(VectorCommand command, SectorState target)
+    {
+        if (!command.Source.IsValid || !command.Target.IsValid)
+            return new PolicyDecision { Allowed = false, Reason = "invalid sector address" };
+
+        if (!target.Enabled)
+            return new PolicyDecision { Allowed = false, Reason = "target sector disabled" };
+
+        if (BlockedTargetSectors.Contains(command.Target.Index))
+            return new PolicyDecision { Allowed = false, Reason = "target sector blocked by policy" };
+
+        if (BlockedVerbs.Contains(command.Verb))
+            return new PolicyDecision { Allowed = false, Reason = $"verb '{command.Verb}' blocked by policy" };
+
+        if (command.TrustScore < target.TrustFloor)
+            return new PolicyDecision { Allowed = false, Reason = $"trust {command.TrustScore:F2} below sector floor {target.TrustFloor:F2}" };
+
+        if (command.TrustScore < MinTrustByPriority[command.Priority])
+            return new PolicyDecision
+            {
+                Allowed = false,
+                Reason = $"trust {command.TrustScore:F2} below priority floor {MinTrustByPriority[command.Priority]:F2}"
+            };
+
+        if (!AllowedVerbsByRole.TryGetValue(command.Role, out var allowed))
+            return new PolicyDecision { Allowed = false, Reason = $"unknown role '{command.Role}'" };
+
+        if (!(allowed.Contains("*") || allowed.Contains(command.Verb)))
+            return new PolicyDecision
+            {
+                Allowed = false,
+                Reason = $"role '{command.Role}' cannot execute verb '{command.Verb}'"
+            };
+
+        return new PolicyDecision { Allowed = true, Reason = "accepted by policy" };
+    }
+}
+
+public sealed class SectorRegistry
+{
+    private readonly ConcurrentDictionary<int, List<ICommandHandler>> _bySector = new();
+    private readonly ConcurrentDictionary<string, List<ICommandHandler>> _byVerb =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<ICommandHandler> _fallback = new();
+
+    public void RegisterSector(SectorAddress address, ICommandHandler handler)
+    {
+        var list = _bySector.GetOrAdd(address.Index, _ => new List<ICommandHandler>());
+        list.Add(handler);
+    }
+
+    public void RegisterVerb(string verb, ICommandHandler handler)
+    {
+        var list = _byVerb.GetOrAdd(verb, _ => new List<ICommandHandler>());
+        list.Add(handler);
+    }
+
+    public void RegisterFallback(ICommandHandler handler) => _fallback.Add(handler);
+
+    public IReadOnlyList<ICommandHandler> Resolve(VectorCommand command)
+    {
+        var result = new List<ICommandHandler>();
+
+        if (_bySector.TryGetValue(command.Target.Index, out var sectorHandlers))
+        {
+            result.AddRange(sectorHandlers.Where(h => h.CanHandle(command)));
+        }
+
+        if (_byVerb.TryGetValue(command.Verb, out var verbHandlers))
+        {
+            foreach (var handler in verbHandlers)
+            {
+                if (handler.CanHandle(command) && !result.Contains(handler))
+                    result.Add(handler);
+            }
+        }
+
+        foreach (var handler in _fallback)
+        {
+            if (handler.CanHandle(command) && !result.Contains(handler))
+                result.Add(handler);
+        }
+
+        return result;
+    }
+}
+
+public sealed class SectorVectorProtocol144
+{
+    private readonly SectorState[] _sectors = new SectorState[SectorAddress.Size * SectorAddress.Size];
+
+    public SectorVectorProtocol144(VectorProtocolPolicy? policy = null)
+    {
+        Policy = policy ?? new VectorProtocolPolicy();
+        Registry = new SectorRegistry();
+
+        for (var i = 0; i < _sectors.Length; i++)
+        {
+            var address = SectorAddress.FromIndex(i);
+            _sectors[i] = new SectorState
+            {
+                Address = address,
+                Label = $"Sector-{i:D3}",
+                Enabled = true,
+                TrustFloor = 0.0
+            };
+        }
+    }
+
+    public VectorProtocolPolicy Policy { get; }
+    public SectorRegistry Registry { get; }
+
+    public event Action<ProtocolAuditEvent>? AuditEmitted;
+
+    public IReadOnlyList<SectorState> Sectors => _sectors;
+
+    public SectorState GetSector(SectorAddress address)
+    {
+        if (!address.IsValid)
+            throw new ArgumentOutOfRangeException(nameof(address));
+
+        return _sectors[address.Index];
+    }
+
+    public void ConfigureSector(SectorAddress address, Action<SectorState> configure)
+    {
+        configure(GetSector(address));
+    }
+
+    public async ValueTask<CommandResult> ExecuteAsync(VectorCommand command, CancellationToken cancellationToken = default)
+    {
+        if (!command.Source.IsValid || !command.Target.IsValid)
+        {
+            return AttachAudit(
+                CommandResult.Rejected("invalid source or target sector"),
+                new List<ProtocolAuditEvent>
+                {
+                    new()
+                    {
+                        Timestamp = DateTimeOffset.UtcNow,
+                        CommandId = command.CommandId,
+                        Stage = "validate",
+                        Message = "source or target out of bounds",
+                        Data = new { source = command.Source.ToString(), target = command.Target.ToString() }
+                    }
+                });
+        }
+
+        var target = GetSector(command.Target);
+        var decision = Policy.Evaluate(command, target);
+        var context = new ProtocolContext(command, target, decision);
+
+        context.Audit("ingress", "command received", new
+        {
+            command.CommandId,
+            command.Role,
+            command.Verb,
+            Source = command.Source.ToString(),
+            Target = command.Target.ToString(),
+            Delta = command.Delta.ToString(),
+            command.Priority,
+            command.TrustScore
+        });
+
+        context.Audit("policy", decision.Reason);
+
+        if (!decision.Allowed)
+        {
+            context.Audit("egress", "command blocked");
+            EmitAudit(context);
+            return AttachAudit(CommandResult.Blocked(decision.Reason), context.AuditTrail);
+        }
+
+        var handlers = Registry.Resolve(command);
+        if (handlers.Count == 0)
+        {
+            context.Audit("dispatch", "no handler resolved");
+            EmitAudit(context);
+            return AttachAudit(CommandResult.Failed("no handler resolved"), context.AuditTrail);
+        }
+
+        foreach (var handler in handlers)
+        {
+            context.Audit("dispatch", $"handler '{handler.Name}' selected");
+
+            var result = await handler.HandleAsync(context, cancellationToken);
+
+            if (result.Disposition is ProtocolDisposition.Completed or ProtocolDisposition.Routed or ProtocolDisposition.Accepted)
+            {
+                context.Audit("egress", $"handler '{handler.Name}' completed");
+                EmitAudit(context);
+                return AttachAudit(result, context.AuditTrail);
+            }
+
+            context.Audit("dispatch", $"handler '{handler.Name}' returned {result.Disposition}");
+        }
+
+        context.Audit("egress", "all handlers exhausted");
+        EmitAudit(context);
+        return AttachAudit(CommandResult.Failed("all handlers exhausted"), context.AuditTrail);
+    }
+
+    private void EmitAudit(ProtocolContext context)
+    {
+        foreach (var evt in context.AuditTrail)
+            AuditEmitted?.Invoke(evt);
+    }
+
+    private static CommandResult AttachAudit(CommandResult result, List<ProtocolAuditEvent> trail)
+    {
+        result.AuditTrail = trail.ToList();
+        return result;
+    }
+}
+
+public sealed class StatusHandler : ICommandHandler
+{
+    public string Name => "status-handler";
+
+    public bool CanHandle(VectorCommand command) =>
+        command.Verb.Equals("PING", StringComparison.OrdinalIgnoreCase) ||
+        command.Verb.Equals("STATUS", StringComparison.OrdinalIgnoreCase) ||
+        command.Verb.Equals("QUERY", StringComparison.OrdinalIgnoreCase);
+
+    public ValueTask<CommandResult> HandleAsync(ProtocolContext context, CancellationToken cancellationToken)
+    {
+        context.Audit("handler", "status probe executed");
+
+        var result = CommandResult.Completed("sector status ok", new Dictionary<string, object?>
+        {
+            ["target_label"] = context.TargetSector.Label,
+            ["target_sector"] = context.TargetSector.Address.ToString(),
+            ["delta"] = context.Command.Delta.ToString(),
+            ["payload"] = context.Command.Payload
+        });
+
+        return ValueTask.FromResult(result);
+    }
+}
+
+public sealed class VectorRouteHandler : ICommandHandler
+{
+    public string Name => "vector-route-handler";
+
+    public bool CanHandle(VectorCommand command) =>
+        command.Verb.Equals("VECTOR", StringComparison.OrdinalIgnoreCase) ||
+        command.Verb.Equals("ROUTE", StringComparison.OrdinalIgnoreCase) ||
+        command.Verb.Equals("PATCH", StringComparison.OrdinalIgnoreCase);
+
+    public ValueTask<CommandResult> HandleAsync(ProtocolContext context, CancellationToken cancellationToken)
+    {
+        var delta = context.Command.Delta;
+
+        context.Audit("handler", "vector route executed", new
+        {
+            delta.DeltaRow,
+            delta.DeltaColumn,
+            delta.Axis,
+            delta.Manhattan,
+            delta.Euclidean
+        });
+
+        var result = CommandResult.Routed("vector command routed", new Dictionary<string, object?>
+        {
+            ["source"] = context.Command.Source.ToString(),
+            ["target"] = context.Command.Target.ToString(),
+            ["axis"] = delta.Axis,
+            ["manhattan"] = delta.Manhattan,
+            ["euclidean"] = Math.Round(delta.Euclidean, 3),
+            ["priority"] = context.Command.Priority.ToString(),
+            ["payload"] = context.Command.Payload
+        });
+
+        return ValueTask.FromResult(result);
+    }
+}
+
+public sealed class FallbackRejectHandler : ICommandHandler
+{
+    public string Name => "fallback-reject";
+
+    public bool CanHandle(VectorCommand command) => true;
+
+    public ValueTask<CommandResult> HandleAsync(ProtocolContext context, CancellationToken cancellationToken)
+    {
+        context.Audit("handler", "fallback reject executed");
+        return ValueTask.FromResult(CommandResult.Rejected($"verb '{context.Command.Verb}' not supported"));
+    }
+}
+
+public static class Demo
+{
+    public static async Task Main()
+    {
+        var protocol = new SectorVectorProtocol144();
+
+        protocol.ConfigureSector(new SectorAddress(0, 0), s =>
+        {
+            s.Label = "Core-Origin";
+            s.TrustFloor = 0.20;
+            s.Tags.Add("core");
+        });
+
+        protocol.ConfigureSector(new SectorAddress(8, 3), s =>
+        {
+            s.Label = "Transit-083";
+            s.TrustFloor = 0.55;
+            s.Tags.Add("transit");
+            s.Tags.Add("vector");
+        });
+
+        protocol.ConfigureSector(new SectorAddress(11, 11), s =>
+        {
+            s.Label = "Vault-143";
+            s.TrustFloor = 0.90;
+            s.Tags.Add("restricted");
+        });
+
+        protocol.Policy.BlockedTargetSectors.Add(new SectorAddress(11, 11).Index);
+
+        protocol.Registry.RegisterVerb("PING", new StatusHandler());
+        protocol.Registry.RegisterVerb("STATUS", new StatusHandler());
+        protocol.Registry.RegisterVerb("QUERY", new StatusHandler());
+        protocol.Registry.RegisterVerb("VECTOR", new VectorRouteHandler());
+        protocol.Registry.RegisterVerb("ROUTE", new VectorRouteHandler());
+        protocol.Registry.RegisterVerb("PATCH", new VectorRouteHandler());
+        protocol.Registry.RegisterFallback(new FallbackRejectHandler());
+
+        protocol.AuditEmitted += evt =>
+        {
+            Console.WriteLine(
+                $"[{evt.Timestamp:O}] {evt.Stage,-8} {evt.Message} " +
+                $"{(evt.Data is null ? "" : JsonSerializer.Serialize(evt.Data))}");
+        };
+
+        var command = new VectorCommand
+        {
+            Role = "operator",
+            Verb = "VECTOR",
+            Source = new SectorAddress(0, 0),
+            Target = new SectorAddress(8, 3),
+            Priority = VectorPriority.High,
+            TrustScore = 0.72,
+            Payload = new Dictionary<string, object?>
+            {
+                ["opcode"] = "SYNC",
+                ["lane"] = "north-east",
+                ["sequence"] = 42
+            }
+        };
+
+        var result = await protocol.ExecuteAsync(command);
+
+        Console.WriteLine();
+        Console.WriteLine($"Disposition: {result.Disposition}");
+        Console.WriteLine($"Message:     {result.Message}");
+        Console.WriteLine($"Data:        {JsonSerializer.Serialize(result.Data, new JsonSerializerOptions { WriteIndented = true })}");
+
+        Console.WriteLine();
+        Console.WriteLine("Audit Trail:");
+        foreach (var evt in result.AuditTrail)
+        {
+            Console.WriteLine($"- {evt.Stage}: {evt.Message}");
+        }
+    }
+}
