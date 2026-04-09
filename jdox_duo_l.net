@@ -1,0 +1,90 @@
+public sealed class JdoxDuoOverwriteService
+{
+    private readonly List<OverwriteAuditEvent> _ledger = new();
+
+    public (bool ok, string status, string message) TryExecuteOverwrite(
+        JdoxDuoOverwriteRequest req,
+        VersionedRecord current,
+        Func<string, bool> nonceAlreadyUsed,
+        Func<string, bool> knownOperator,
+        Func<string, bool> validSignature)
+    {
+        var assessment = JdoxDuoFraudPolicy.Evaluate(
+            req,
+            current.Version,
+            current.PayloadHash,
+            nonceAlreadyUsed,
+            knownOperator,
+            validSignature);
+
+        if (assessment.Fraudulent)
+        {
+            current.LockedForReview = true;
+            req.Disposition = OverwriteDisposition.FraudConfirmed;
+            AppendLedger(req.RequestId, "fraud_confirmed", string.Join(",", assessment.Reasons));
+            return (false, "fraud_confirmed", "Overwrite blocked and target locked for review.");
+        }
+
+        if (assessment.Suspicious)
+        {
+            current.LockedForReview = true;
+            req.Disposition = OverwriteDisposition.FraudSuspected;
+            AppendLedger(req.RequestId, "fraud_suspected", string.Join(",", assessment.Reasons));
+            return (false, "fraud_suspected", "Overwrite quarantined for manual review.");
+        }
+
+        // Compare-and-swap protection
+        if (req.Target.ExpectedVersion != current.Version ||
+            !string.Equals(req.Target.CurrentHash, current.PayloadHash, StringComparison.Ordinal))
+        {
+            current.LockedForReview = true;
+            req.Disposition = OverwriteDisposition.Blocked;
+            AppendLedger(req.RequestId, "cas_block", "stale_target_state");
+            return (false, "blocked", "Target changed since request creation.");
+        }
+
+        var beforeJson = current.PayloadJson;
+        var beforeHash = current.PayloadHash;
+        var beforeVersion = current.Version;
+
+        current.PayloadJson = req.ProposedPayloadJson;
+        current.PayloadHash = LedgerHash.Sha256Hex(req.ProposedPayloadJson);
+        current.Version += 1;
+
+        req.Disposition = OverwriteDisposition.Executed;
+
+        AppendLedger(req.RequestId, "overwrite_executed",
+            $"beforeVersion={beforeVersion};afterVersion={current.Version};beforeHash={beforeHash};afterHash={current.PayloadHash}");
+
+        return (true, "executed", "Overwrite applied with audit continuity.");
+    }
+
+    public (bool ok, string status) Rollback(
+        string requestId,
+        VersionedRecord current,
+        string priorPayloadJson,
+        long priorVersion)
+    {
+        current.PayloadJson = priorPayloadJson;
+        current.PayloadHash = LedgerHash.Sha256Hex(priorPayloadJson);
+        current.Version = priorVersion;
+        current.LockedForReview = true;
+
+        AppendLedger(requestId, "rollback_executed", $"restoredVersion={priorVersion}");
+        return (true, "rolled_back");
+    }
+
+    private void AppendLedger(string requestId, string action, string data)
+    {
+        var prev = _ledger.Count == 0 ? "genesis" : _ledger[^1].EventHash;
+        var evt = new OverwriteAuditEvent
+        {
+            RequestId = requestId,
+            Action = action,
+            PrevHash = prev,
+            DataJson = data
+        };
+        evt.EventHash = LedgerHash.Sha256Hex($"{evt.RequestId}|{evt.Action}|{evt.Utc:O}|{evt.PrevHash}|{evt.DataJson}");
+        _ledger.Add(evt);
+    }
+}
