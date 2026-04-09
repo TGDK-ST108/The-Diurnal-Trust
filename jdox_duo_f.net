@@ -1,0 +1,73 @@
+public static class JdoxDuoFraudPolicy
+{
+    public static FraudAssessment Evaluate(
+        JdoxDuoOverwriteRequest req,
+        long actualVersion,
+        string actualHash,
+        Func<string, bool> nonceAlreadyUsed,
+        Func<string, bool> knownOperator,
+        Func<string, bool> validSignature)
+    {
+        var result = new FraudAssessment();
+
+        if (DateTimeOffset.UtcNow > req.ExpiresUtc)
+            result.Reasons.Add("request_expired");
+
+        if (string.IsNullOrWhiteSpace(req.LegalBasis))
+            result.Reasons.Add("missing_legal_basis");
+
+        if (string.IsNullOrWhiteSpace(req.PolicyBasis))
+            result.Reasons.Add("missing_policy_basis");
+
+        if (string.IsNullOrWhiteSpace(req.Scope))
+            result.Reasons.Add("missing_scope");
+
+        if (req.Target.ExpectedVersion != actualVersion)
+            result.Reasons.Add("version_mismatch");
+
+        if (!string.Equals(req.Target.CurrentHash, actualHash, StringComparison.Ordinal))
+            result.Reasons.Add("hash_mismatch");
+
+        if (nonceAlreadyUsed(req.Nonce))
+            result.Reasons.Add("replay_nonce");
+
+        if (!knownOperator(req.OperatorId))
+            result.Reasons.Add("unknown_operator");
+
+        if (!validSignature(req.ClientSignature))
+            result.Reasons.Add("invalid_signature");
+
+        var approvedRoles = req.Approvals
+            .Where(x => x.Approved)
+            .Select(x => x.Role)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (!approvedRoles.Contains("Legal"))
+            result.Reasons.Add("missing_legal_approval");
+
+        if (!approvedRoles.Contains("Compliance"))
+            result.Reasons.Add("missing_compliance_approval");
+
+        if (approvedRoles.Contains("Legal") && approvedRoles.Contains("Compliance") &&
+            req.Approvals.Where(x => x.Approved).Select(x => x.ApproverId).Distinct().Count() < 2)
+        {
+            result.Reasons.Add("approval_separation_failed");
+        }
+
+        result.Fraudulent =
+            result.Reasons.Contains("replay_nonce") ||
+            result.Reasons.Contains("invalid_signature") ||
+            result.Reasons.Contains("unknown_operator") ||
+            result.Reasons.Contains("approval_separation_failed");
+
+        result.Suspicious =
+            result.Fraudulent ||
+            result.Reasons.Contains("version_mismatch") ||
+            result.Reasons.Contains("hash_mismatch") ||
+            result.Reasons.Contains("request_expired");
+
+        result.Allowed = result.Reasons.Count == 0;
+        return result;
+    }
+}
