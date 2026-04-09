@@ -1,0 +1,382 @@
+from dataclasses import dataclass, field, asdict
+from typing import List, Dict, Any, Optional
+import json
+
+
+# ==========================================
+# STALDWELL :: PROCEDURAL OUTCOME ADAPTER
+# ==========================================
+
+@dataclass
+class StaldwellInput:
+    query: str
+    state: str
+    target: str
+    procedure: List[str] = field(default_factory=list)
+    window: str = "unspecified"
+    assets: List[str] = field(default_factory=list)
+    constraints: List[str] = field(default_factory=list)
+    risks: List[str] = field(default_factory=list)
+    signals: List[str] = field(default_factory=list)
+    team_ranks: List[str] = field(default_factory=lambda: ["extract", "reduce", "evict", "divest"])
+    policy: str = "ColdSmart"
+
+
+@dataclass
+class PathScore:
+    path_name: str
+    action_stack: List[str]
+    strength: float
+    adaptability: float
+    survivability: float
+    cost: float
+    speed: float
+    pressure: float
+    outcome_score: float
+    notes: List[str] = field(default_factory=list)
+
+
+@dataclass
+class StaldwellResult:
+    state_assessment: str = ""
+    target_assessment: str = ""
+    top_paths: List[Dict[str, Any]] = field(default_factory=list)
+    best_path: Dict[str, Any] = field(default_factory=dict)
+    failure_triggers: List[str] = field(default_factory=list)
+    fallback_route: List[str] = field(default_factory=list)
+    command_sentence: str = ""
+
+
+# ==========================================
+# STALDWELL ENGINE
+# ==========================================
+
+class Staldwell:
+    """
+    Staldwell:
+    procedural forecasting + route scoring + fallback logic
+
+    Goal:
+    take a state, a target, and a desired outcome style
+    then produce action paths under ColdSmart policy
+    """
+
+    def __init__(self, policy: str = "ColdSmart"):
+        self.policy = policy
+
+    def process(self, spec: StaldwellInput) -> StaldwellResult:
+        state_assessment = self._assess_state(spec)
+        target_assessment = self._assess_target(spec)
+
+        candidate_paths = self._generate_candidate_paths(spec)
+        scored_paths = [self._score_path(spec, p) for p in candidate_paths]
+        scored_paths.sort(key=lambda x: x.outcome_score, reverse=True)
+
+        top_paths = [self._path_to_dict(p) for p in scored_paths[:3]]
+        best = self._path_to_dict(scored_paths[0]) if scored_paths else {}
+
+        failure_triggers = self._detect_failure_triggers(spec, scored_paths[0] if scored_paths else None)
+        fallback_route = self._build_fallback_route(spec, scored_paths[0] if scored_paths else None)
+        command_sentence = self._compose_command_sentence(spec, scored_paths[0] if scored_paths else None)
+
+        return StaldwellResult(
+            state_assessment=state_assessment,
+            target_assessment=target_assessment,
+            top_paths=top_paths,
+            best_path=best,
+            failure_triggers=failure_triggers,
+            fallback_route=fallback_route,
+            command_sentence=command_sentence,
+        )
+
+    # --------------------------------------
+    # ASSESSMENT
+    # --------------------------------------
+
+    def _assess_state(self, spec: StaldwellInput) -> str:
+        lines = []
+
+        lines.append(f"Current state: {spec.state}.")
+        if spec.assets:
+            lines.append(f"Assets present: {', '.join(spec.assets)}.")
+        if spec.constraints:
+            lines.append(f"Constraints active: {', '.join(spec.constraints)}.")
+        if spec.risks:
+            lines.append(f"Risks identified: {', '.join(spec.risks)}.")
+        if spec.signals:
+            lines.append(f"Signals observed: {', '.join(spec.signals)}.")
+
+        if "unstable" in spec.state.lower():
+            lines.append("State is volatile and favors controlled simplification before expansion.")
+        elif "strong" in spec.state.lower() or "adaptable" in spec.state.lower():
+            lines.append("State is viable for pressure-bearing movement and layered execution.")
+        else:
+            lines.append("State requires measured interpretation before committing force.")
+
+        return " ".join(lines)
+
+    def _assess_target(self, spec: StaldwellInput) -> str:
+        t = spec.target.lower()
+
+        if "adapter" in t:
+            return (
+                f"Target '{spec.target}' implies a bridge system: "
+                f"something that translates force, context, and constraints into usable action."
+            )
+        if "ryzen" in t:
+            return (
+                f"Target '{spec.target}' implies high-throughput strength, elasticity under pressure, "
+                f"and sustained performance under shifting demand."
+            )
+
+        return f"Target '{spec.target}' is treated as a high-value outcome requiring procedural fit."
+
+    # --------------------------------------
+    # PATH GENERATION
+    # --------------------------------------
+
+    def _generate_candidate_paths(self, spec: StaldwellInput) -> List[Dict[str, Any]]:
+        return [
+            {
+                "path_name": "Direct Repair Adapter",
+                "action_stack": [
+                    "stabilize current state",
+                    "map strongest assets to target requirements",
+                    "remove fragile dependencies",
+                    "bind adapter core",
+                    "test under pressure",
+                    "iterate on survivability",
+                ],
+                "profile": "strong / efficient / pragmatic"
+            },
+            {
+                "path_name": "Excessive Layered Adapter",
+                "action_stack": [
+                    "build core adapter",
+                    "add abstraction layer",
+                    "add signal interpretation layer",
+                    "add fallback routing layer",
+                    "add pressure recovery layer",
+                    "harden for extended use",
+                ],
+                "profile": "excessive / deep / scalable"
+            },
+            {
+                "path_name": "ColdSmart Tactical Adapter",
+                "action_stack": [
+                    "extract useful signal",
+                    "reduce waste and ambiguity",
+                    "evict unstable pathways",
+                    "divest nonessential weight",
+                    "recenter on target fit",
+                    "deploy in clean sequence",
+                ],
+                "profile": "controlled / tactical / resilient"
+            },
+        ]
+
+    # --------------------------------------
+    # SCORING
+    # --------------------------------------
+
+    def _score_path(self, spec: StaldwellInput, path: Dict[str, Any]) -> PathScore:
+        name = path["path_name"].lower()
+        actions = path["action_stack"]
+
+        strength = 0.65
+        adaptability = 0.65
+        survivability = 0.65
+        cost = 0.50
+        speed = 0.50
+        pressure = 0.50
+        notes = []
+
+        target = spec.target.lower()
+        state = spec.state.lower()
+
+        if "ryzen" in target or "strong" in target:
+            strength += 0.20
+            pressure += 0.15
+            notes.append("Target favors strength-bearing architecture.")
+
+        if "adaptable" in target or "adapter" in target:
+            adaptability += 0.20
+            notes.append("Target favors translation and flexibility.")
+
+        if "unstable" in state:
+            survivability += 0.15
+            speed -= 0.10
+            notes.append("State volatility penalizes reckless speed.")
+
+        if "excessive layered adapter" in name:
+            adaptability += 0.15
+            strength += 0.10
+            cost += 0.20
+            speed -= 0.10
+            notes.append("Layered path gains flexibility but costs more.")
+
+        if "direct repair adapter" in name:
+            speed += 0.20
+            cost -= 0.10
+            notes.append("Direct repair path is faster and leaner.")
+
+        if "coldsmart tactical adapter" in name:
+            survivability += 0.20
+            pressure += 0.10
+            cost -= 0.05
+            notes.append("ColdSmart path improves discipline and failure control.")
+
+        if spec.constraints:
+            cost += min(0.15, len(spec.constraints) * 0.03)
+            survivability += min(0.12, len(spec.constraints) * 0.02)
+            notes.append("Constraints increase design pressure but can sharpen survivability.")
+
+        if spec.risks:
+            survivability += min(0.18, len(spec.risks) * 0.03)
+            speed -= min(0.12, len(spec.risks) * 0.02)
+            notes.append("Risk awareness slows the route but helps it survive.")
+
+        # Clamp
+        strength = self._clamp(strength)
+        adaptability = self._clamp(adaptability)
+        survivability = self._clamp(survivability)
+        cost = self._clamp(cost)
+        speed = self._clamp(speed)
+        pressure = self._clamp(pressure)
+
+        # Outcome formula:
+        # Favor strength, adaptability, survivability, speed
+        # Penalize cost
+        outcome_score = (
+            (strength * 0.24) +
+            (adaptability * 0.26) +
+            (survivability * 0.26) +
+            (speed * 0.14) +
+            (pressure * 0.10) -
+            (cost * 0.15)
+        )
+
+        outcome_score = round(self._clamp(outcome_score), 4)
+
+        return PathScore(
+            path_name=path["path_name"],
+            action_stack=actions,
+            strength=round(strength, 4),
+            adaptability=round(adaptability, 4),
+            survivability=round(survivability, 4),
+            cost=round(cost, 4),
+            speed=round(speed, 4),
+            pressure=round(pressure, 4),
+            outcome_score=outcome_score,
+            notes=notes,
+        )
+
+    # --------------------------------------
+    # FAILURE / FALLBACK
+    # --------------------------------------
+
+    def _detect_failure_triggers(self, spec: StaldwellInput, best_path: Optional[PathScore]) -> List[str]:
+        triggers = []
+
+        if spec.constraints:
+            triggers.append("Constraint overload causes adapter choke.")
+        if spec.risks:
+            triggers.append("Unmitigated risk spills into execution path.")
+        if "unstable" in spec.state.lower():
+            triggers.append("State destabilizes before the adapter core is fixed.")
+        if best_path and best_path.cost > 0.70:
+            triggers.append("Path becomes too expensive to sustain.")
+        if best_path and best_path.speed < 0.45:
+            triggers.append("Path loses initiative and stalls.")
+
+        if not triggers:
+            triggers.append("Primary failure trigger is loss of target fit during expansion.")
+
+        return triggers
+
+    def _build_fallback_route(self, spec: StaldwellInput, best_path: Optional[PathScore]) -> List[str]:
+        fallback = [
+            "freeze nonessential expansion",
+            "return to core adapter function",
+            "strip decorative or unstable layers",
+            "re-evaluate assets against target",
+            "redeploy with smallest viable stack",
+        ]
+
+        if spec.policy.lower() == "coldsmart":
+            fallback.insert(0, "extract signal from failure event")
+            fallback.insert(1, "reduce ambiguity to one decisive interpretation")
+            fallback.append("divest any feature that does not improve survivability")
+
+        return fallback
+
+    def _compose_command_sentence(self, spec: StaldwellInput, best_path: Optional[PathScore]) -> str:
+        if not best_path:
+            return "No command sentence available."
+
+        return (
+            f"Staldwell Route: from '{spec.state}' toward '{spec.target}', "
+            f"run '{best_path.path_name}' under {spec.policy} policy, "
+            f"lead with '{best_path.action_stack[0]}', and preserve survivability before excess."
+        )
+
+    # --------------------------------------
+    # HELPERS
+    # --------------------------------------
+
+    @staticmethod
+    def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
+        return max(lo, min(hi, v))
+
+    @staticmethod
+    def _path_to_dict(p: PathScore) -> Dict[str, Any]:
+        return asdict(p)
+
+
+# ==========================================
+# EXAMPLE :: "STALDWELL THIS SHIT"
+# ==========================================
+
+if __name__ == "__main__":
+    engine = Staldwell(policy="ColdSmart")
+
+    spec = StaldwellInput(
+        query="Ryzen is excessive, strong, adaptable. I want a complex adapter.",
+        state="strong but expanding; partially unstable under abstraction load",
+        target="complex adaptive Ryzen-class adapter",
+        procedure=[
+            "define adapter purpose",
+            "map state to target",
+            "bind abstraction layers",
+            "test for survivability",
+            "deploy strongest viable route"
+        ],
+        window="mid-build",
+        assets=[
+            "high throughput concept",
+            "strong base identity",
+            "adaptable design intent",
+            "layered abstraction tolerance"
+        ],
+        constraints=[
+            "too much complexity can choke clarity",
+            "adapter must remain usable",
+            "survivability matters more than ornament"
+        ],
+        risks=[
+            "overbuilding",
+            "signal dilution",
+            "state-target mismatch"
+        ],
+        signals=[
+            "desire for strength",
+            "desire for excess",
+            "desire for adaptability",
+            "preference for procedural control"
+        ],
+        team_ranks=["extract", "reduce", "evict", "divest"],
+        policy="ColdSmart",
+    )
+
+    result = engine.process(spec)
+    print(json.dumps(asdict(result), indent=2))
