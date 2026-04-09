@@ -192,3 +192,49 @@ namespace ResidualIncomeFiveColSixDex
         }
     }
 }
+
+public static FiveColRow BuildRow(ResidualIncomeInput input)
+{
+    if (input.CostOfEquityRate <= 0) throw new ArgumentException("CostOfEquityRate must be positive.");
+    if (input.BeginningEquity < 0) throw new ArgumentException("BeginningEquity cannot be negative.");
+    // ... other validations
+}
+
+public static FiveColRow BuildRow(ResidualIncomeInput input, decimal? priorResidualIncome = null)
+{
+    // ... existing logic ...
+    if (priorResidualIncome.HasValue)
+    {
+        decimal growthRate = SafeDiv(input.ResidualIncome - priorResidualIncome.Value, priorResidualIncome.Value);
+        matrixScore *= (1m + growthRate * 0.1m); // Boost score for positive growth
+    }
+}
+
+public static FiveColRow BuildRow(ResidualIncomeInput input, Dictionary<string, decimal> weights = null)
+{
+    weights = weights ?? new Dictionary<string, decimal>
+    {
+        {"Dex1", 0.15m}, {"Dex3", 0.25m}, {"Dex4", 0.25m},
+        {"Dex5", 0.20m}, {"Dex6", 0.15m}
+    };
+    // Use weights in score calculation
+}
+
+public static void ExportToCsv(List<FiveColRow> matrix, string filePath)
+{
+    using (var writer = new StreamWriter(filePath))
+    {
+        writer.WriteLine("Period,Revenue,NetInc,BegEq,EqCharge,ResIncome,D1,D2,D3,D4,D5,D6,Score");
+        foreach (var row in matrix)
+        {
+            writer.WriteLine(
+                $"{row.Period},{row.Revenue},{row.NetIncome},{row.BeginningEquity}," +
+                $"{row.EquityCharge},{row.ResidualIncome},{row.Dex1_NetMargin:P2}," +
+                $"{row.Dex2_EquityChargeRate:P2},{row.Dex3_ResidualMargin:P2}," +
+                $"{row.Dex4_ResidualYield:P2},{row.Dex5_ChargeCoverage:F2}," +
+                $"{row.Dex6_CleanSurplusDrift:P2},{row.MatrixScore:F2}"
+            );
+        }
+    }
+}
+
