@@ -1,0 +1,227 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace DistressExt5
+{
+    public enum SignalType
+    {
+        MoodChange,
+        Withdrawal,
+        ConflictSpike,
+        SleepOrFatigue,
+        SubstanceConcern,
+        AccessAnomaly,
+        RuleViolation,
+        VerbalThreat,
+        BodyLanguageCue,
+        WelfareConcern
+    }
+
+    public enum BodyLanguageFlag
+    {
+        None,
+        ArmsTightAcrossChest,
+        ClenchedFists,
+        HeavyBreathing,
+        PacingOrAgitation,
+        TerrifiedLook,
+        FixedStare,
+        ThreateningPosture,
+        SuddenBehaviorChange
+    }
+
+    public enum EscalationPath
+    {
+        None,
+        SupportConversation,
+        EAPOrMentalHealthReferral,
+        SupervisorReview,
+        SecurityReview,
+        Ext5HumanReview,
+        LawfulThreatReporting
+    }
+
+    public sealed class SignalEvent
+    {
+        public DateTimeOffset Timestamp { get; set; } = DateTimeOffset.UtcNow;
+        public SignalType Type { get; set; }
+        public double Weight { get; set; }     // 0..1
+        public string Source { get; set; } = "";
+        public string Notes { get; set; } = "";
+        public BodyLanguageFlag BodyFlag { get; set; } = BodyLanguageFlag.None;
+    }
+
+    public sealed class SubjectState
+    {
+        public string SubjectId { get; set; } = "";
+        public List<SignalEvent> Events { get; } = new();
+        public bool ImmediateDangerCue { get; set; }
+        public bool CredibleThreatCue { get; set; }
+        public bool DonContext { get; set; }   // Department of the Navy context
+    }
+
+    public sealed class DistressAssessment
+    {
+        public double DistressScore { get; set; }
+        public double BehaviorCorroborationScore { get; set; }
+        public bool Ext5Triggered { get; set; }
+        public EscalationPath Path { get; set; }
+        public List<string> Reasons { get; } = new();
+    }
+
+    public sealed class DistressEngine
+    {
+        public DistressAssessment Assess(SubjectState state)
+        {
+            var result = new DistressAssessment();
+
+            var recent = state.Events
+                .Where(e => e.Timestamp >= DateTimeOffset.UtcNow.AddDays(-14))
+                .ToList();
+
+            result.DistressScore = Clamp01(
+                recent.Where(e => e.Type != SignalType.BodyLanguageCue).Sum(e => e.Weight));
+
+            result.BehaviorCorroborationScore = Clamp01(
+                recent.Where(e => e.Type == SignalType.BodyLanguageCue).Sum(e => e.Weight));
+
+            if (recent.Any(e => e.Type == SignalType.Withdrawal))
+                result.Reasons.Add("withdrawal/change in engagement");
+            if (recent.Any(e => e.Type == SignalType.ConflictSpike))
+                result.Reasons.Add("conflict or agitation pattern");
+            if (recent.Any(e => e.Type == SignalType.SleepOrFatigue))
+                result.Reasons.Add("fatigue/sleep-related distress signal");
+            if (recent.Any(e => e.Type == SignalType.SubstanceConcern))
+                result.Reasons.Add("substance-related concern");
+            if (recent.Any(e => e.Type == SignalType.AccessAnomaly))
+                result.Reasons.Add("access or security anomaly");
+            if (recent.Any(e => e.Type == SignalType.BodyLanguageCue))
+                result.Reasons.Add("live body-language corroboration observed");
+
+            // EXT5 rule:
+            // trigger only on combined pattern, not body language alone
+            result.Ext5Triggered =
+                state.ImmediateDangerCue ||
+                state.CredibleThreatCue ||
+                (result.DistressScore >= 0.65 && result.BehaviorCorroborationScore >= 0.25) ||
+                (recent.Count(e => e.Type == SignalType.VerbalThreat) > 0);
+
+            if (state.ImmediateDangerCue)
+            {
+                result.Path = EscalationPath.LawfulThreatReporting;
+                result.Reasons.Add("immediate danger cue present");
+                return result;
+            }
+
+            if (result.Ext5Triggered)
+            {
+                if (state.CredibleThreatCue)
+                {
+                    result.Path = state.DonContext
+                        ? EscalationPath.LawfulThreatReporting
+                        : EscalationPath.SecurityReview;
+                    result.Reasons.Add("credible threat threshold met");
+                }
+                else
+                {
+                    result.Path = EscalationPath.Ext5HumanReview;
+                    result.Reasons.Add("multi-signal threshold met for human review");
+                }
+
+                return result;
+            }
+
+            if (result.DistressScore >= 0.45)
+            {
+                result.Path = EscalationPath.SupportConversation;
+                result.Reasons.Add("moderate distress pattern");
+                return result;
+            }
+
+            if (result.DistressScore >= 0.30)
+            {
+                result.Path = EscalationPath.EAPOrMentalHealthReferral;
+                result.Reasons.Add("low-to-moderate distress support indicated");
+                return result;
+            }
+
+            result.Path = EscalationPath.None;
+            return result;
+        }
+
+        private static double Clamp01(double v)
+        {
+            if (v < 0) return 0;
+            if (v > 1) return 1;
+            return v;
+        }
+    }
+
+    public static class Demo
+    {
+        public static void Main()
+        {
+            var state = new SubjectState
+            {
+                SubjectId = "person-01",
+                DonContext = true,
+                CredibleThreatCue = false,
+                ImmediateDangerCue = false
+            };
+
+            state.Events.Add(new SignalEvent
+            {
+                Type = SignalType.Withdrawal,
+                Weight = 0.18,
+                Source = "manager",
+                Notes = "Pulled away from coworkers"
+            });
+
+            state.Events.Add(new SignalEvent
+            {
+                Type = SignalType.ConflictSpike,
+                Weight = 0.20,
+                Source = "peer",
+                Notes = "Sharp increase in confrontational behavior"
+            });
+
+            state.Events.Add(new SignalEvent
+            {
+                Type = SignalType.SleepOrFatigue,
+                Weight = 0.12,
+                Source = "self-report",
+                Notes = "Not sleeping, visibly exhausted"
+            });
+
+            state.Events.Add(new SignalEvent
+            {
+                Type = SignalType.BodyLanguageCue,
+                Weight = 0.12,
+                Source = "observer",
+                BodyFlag = BodyLanguageFlag.PacingOrAgitation,
+                Notes = "Pacing and agitated"
+            });
+
+            state.Events.Add(new SignalEvent
+            {
+                Type = SignalType.BodyLanguageCue,
+                Weight = 0.14,
+                Source = "observer",
+                BodyFlag = BodyLanguageFlag.HeavyBreathing,
+                Notes = "Heavy breathing during confrontation"
+            });
+
+            var engine = new DistressEngine();
+            var assessment = engine.Assess(state);
+
+            Console.WriteLine($"DistressScore: {assessment.DistressScore:F2}");
+            Console.WriteLine($"BehaviorCorroboration: {assessment.BehaviorCorroborationScore:F2}");
+            Console.WriteLine($"Ext5Triggered: {assessment.Ext5Triggered}");
+            Console.WriteLine($"Path: {assessment.Path}");
+            Console.WriteLine("Reasons:");
+            foreach (var reason in assessment.Reasons)
+                Console.WriteLine($"- {reason}");
+        }
+    }
+}
