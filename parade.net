@@ -1,0 +1,412 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace FraughtNightProtocol
+{
+    public enum ThreatLevel
+    {
+        Low,
+        Elevated,
+        High,
+        Critical
+    }
+
+    public enum ProtocolStage
+    {
+        Confirm,
+        Freeze,
+        Shield,
+        Separate,
+        Stabilize,
+        Preserve,
+        EscalateSafely,
+        Exit,
+        Review
+    }
+
+    public enum ActionDisposition
+    {
+        Pending,
+        Allowed,
+        Blocked,
+        Completed,
+        Failed
+    }
+
+    public enum ActorRole
+    {
+        Observer,
+        Coordinator,
+        MedicalLead,
+        SecurityLead,
+        CommunicationsLead,
+        Commander,
+        Auditor
+    }
+
+    public sealed class IncidentContext
+    {
+        public string IncidentId { get; init; } = Guid.NewGuid().ToString("N");
+        public string Title { get; set; } = "Fraught Night Incident";
+        public ThreatLevel ThreatLevel { get; set; } = ThreatLevel.Elevated;
+        public string Location { get; set; } = "Unknown";
+        public bool CiviliansPresent { get; set; }
+        public bool MedicalNeedPresent { get; set; }
+        public bool VerifiedThreatSource { get; set; }
+        public bool SafeWithdrawalAvailable { get; set; }
+        public bool EvidencePreserved { get; set; }
+        public bool SeniorReviewGranted { get; set; }
+        public bool LawfulAuthorityNotified { get; set; }
+        public Dictionary<string, object?> Metadata { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public List<AuditEvent> AuditTrail { get; } = new();
+
+        public void Audit(string stage, string message, object? data = null)
+        {
+            AuditTrail.Add(new AuditEvent
+            {
+                Timestamp = DateTimeOffset.UtcNow,
+                IncidentId = IncidentId,
+                Stage = stage,
+                Message = message,
+                Data = data
+            });
+        }
+    }
+
+    public sealed class AuditEvent
+    {
+        public DateTimeOffset Timestamp { get; init; }
+        public string IncidentId { get; init; } = "";
+        public string Stage { get; init; } = "";
+        public string Message { get; init; } = "";
+        public object? Data { get; init; }
+    }
+
+    public sealed class ProtocolAction
+    {
+        public string Name { get; init; } = "";
+        public ProtocolStage Stage { get; init; }
+        public ActorRole RequiredRole { get; init; }
+        public Func<IncidentContext, bool> CanExecute { get; init; } = _ => true;
+        public Func<IncidentContext, CancellationToken, Task<ActionResult>> ExecuteAsync { get; init; } =
+            (_, _) => Task.FromResult(ActionResult.Completed("noop"));
+    }
+
+    public sealed class ActionResult
+    {
+        public ActionDisposition Disposition { get; set; }
+        public string Message { get; set; } = "";
+        public Dictionary<string, object?> Data { get; set; } = new();
+
+        public static ActionResult Allowed(string message, Dictionary<string, object?>? data = null) =>
+            new() { Disposition = ActionDisposition.Allowed, Message = message, Data = data ?? new() };
+
+        public static ActionResult Blocked(string message, Dictionary<string, object?>? data = null) =>
+            new() { Disposition = ActionDisposition.Blocked, Message = message, Data = data ?? new() };
+
+        public static ActionResult Completed(string message, Dictionary<string, object?>? data = null) =>
+            new() { Disposition = ActionDisposition.Completed, Message = message, Data = data ?? new() };
+
+        public static ActionResult Failed(string message, Dictionary<string, object?>? data = null) =>
+            new() { Disposition = ActionDisposition.Failed, Message = message, Data = data ?? new() };
+    }
+
+    public sealed class StageResult
+    {
+        public ProtocolStage Stage { get; set; }
+        public bool Success { get; set; }
+        public List<ActionResult> ActionResults { get; set; } = new();
+    }
+
+    public sealed class FraughtNightEngine
+    {
+        private readonly Dictionary<ProtocolStage, List<ProtocolAction>> _actions = new();
+
+        public FraughtNightEngine()
+        {
+            RegisterDefaults();
+        }
+
+        public void RegisterAction(ProtocolAction action)
+        {
+            if (!_actions.TryGetValue(action.Stage, out var list))
+            {
+                list = new List<ProtocolAction>();
+                _actions[action.Stage] = list;
+            }
+            list.Add(action);
+        }
+
+        public async Task<List<StageResult>> RunAsync(
+            IncidentContext context,
+            Dictionary<ProtocolStage, ActorRole> stageActors,
+            CancellationToken cancellationToken = default)
+        {
+            var results = new List<StageResult>();
+
+            foreach (var stage in Enum.GetValues<ProtocolStage>())
+            {
+                var stageResult = new StageResult { Stage = stage, Success = true };
+                context.Audit(stage.ToString(), "stage_started");
+
+                if (!_actions.TryGetValue(stage, out var actions) || actions.Count == 0)
+                {
+                    context.Audit(stage.ToString(), "no_actions_registered");
+                    results.Add(stageResult);
+                    continue;
+                }
+
+                var actingRole = stageActors.TryGetValue(stage, out var role)
+                    ? role
+                    : ActorRole.Observer;
+
+                foreach (var action in actions)
+                {
+                    if (actingRole != action.RequiredRole && actingRole != ActorRole.Commander)
+                    {
+                        var blocked = ActionResult.Blocked(
+                            $"role '{actingRole}' cannot execute '{action.Name}'",
+                            new Dictionary<string, object?> { ["required_role"] = action.RequiredRole.ToString() });
+
+                        stageResult.ActionResults.Add(blocked);
+                        stageResult.Success = false;
+                        context.Audit(stage.ToString(), "role_blocked", new { action = action.Name, actingRole, action.RequiredRole });
+                        continue;
+                    }
+
+                    if (!action.CanExecute(context))
+                    {
+                        var blocked = ActionResult.Blocked($"preconditions failed for '{action.Name}'");
+                        stageResult.ActionResults.Add(blocked);
+                        stageResult.Success = false;
+                        context.Audit(stage.ToString(), "precondition_blocked", new { action = action.Name });
+                        continue;
+                    }
+
+                    try
+                    {
+                        var result = await action.ExecuteAsync(context, cancellationToken);
+                        stageResult.ActionResults.Add(result);
+
+                        context.Audit(stage.ToString(), "action_executed", new
+                        {
+                            action = action.Name,
+                            result = result.Disposition.ToString(),
+                            result.Message
+                        });
+
+                        if (result.Disposition is ActionDisposition.Blocked or ActionDisposition.Failed)
+                            stageResult.Success = false;
+                    }
+                    catch (Exception ex)
+                    {
+                        var failed = ActionResult.Failed($"exception in '{action.Name}'", new Dictionary<string, object?>
+                        {
+                            ["exception"] = ex.Message
+                        });
+                        stageResult.ActionResults.Add(failed);
+                        stageResult.Success = false;
+                        context.Audit(stage.ToString(), "action_exception", new { action = action.Name, ex.Message });
+                    }
+                }
+
+                context.Audit(stage.ToString(), "stage_completed", new { stageResult.Success });
+                results.Add(stageResult);
+            }
+
+            return results;
+        }
+
+        private void RegisterDefaults()
+        {
+            RegisterAction(new ProtocolAction
+            {
+                Name = "verify-threat-source",
+                Stage = ProtocolStage.Confirm,
+                RequiredRole = ActorRole.Observer,
+                ExecuteAsync = (ctx, _) =>
+                {
+                    if (ctx.VerifiedThreatSource)
+                    {
+                        return Task.FromResult(ActionResult.Completed("threat source verified"));
+                    }
+
+                    return Task.FromResult(ActionResult.Blocked("threat source not yet verified"));
+                }
+            });
+
+            RegisterAction(new ProtocolAction
+            {
+                Name = "freeze-unilateral-escalation",
+                Stage = ProtocolStage.Freeze,
+                RequiredRole = ActorRole.Commander,
+                ExecuteAsync = (ctx, _) =>
+                {
+                    ctx.Metadata["offensive_actions_locked"] = true;
+                    return Task.FromResult(ActionResult.Completed("offensive actions locked behind senior review"));
+                }
+            });
+
+            RegisterAction(new ProtocolAction
+            {
+                Name = "shield-civilians",
+                Stage = ProtocolStage.Shield,
+                RequiredRole = ActorRole.SecurityLead,
+                CanExecute = ctx => ctx.CiviliansPresent,
+                ExecuteAsync = (ctx, _) =>
+                {
+                    ctx.Metadata["civilian_protection"] = "active";
+                    return Task.FromResult(ActionResult.Completed("civilian shielding plan activated"));
+                }
+            });
+
+            RegisterAction(new ProtocolAction
+            {
+                Name = "separate-hostile-parties",
+                Stage = ProtocolStage.Separate,
+                RequiredRole = ActorRole.SecurityLead,
+                ExecuteAsync = (ctx, _) =>
+                {
+                    ctx.Metadata["separation_corridors"] = "established";
+                    return Task.FromResult(ActionResult.Completed("separation corridors established"));
+                }
+            });
+
+            RegisterAction(new ProtocolAction
+            {
+                Name = "assign-medical-lead",
+                Stage = ProtocolStage.Stabilize,
+                RequiredRole = ActorRole.MedicalLead,
+                CanExecute = ctx => ctx.MedicalNeedPresent,
+                ExecuteAsync = (ctx, _) =>
+                {
+                    ctx.Metadata["medical_triage"] = "assigned";
+                    return Task.FromResult(ActionResult.Completed("medical triage lead assigned"));
+                }
+            });
+
+            RegisterAction(new ProtocolAction
+            {
+                Name = "preserve-evidence",
+                Stage = ProtocolStage.Preserve,
+                RequiredRole = ActorRole.Auditor,
+                ExecuteAsync = (ctx, _) =>
+                {
+                    ctx.EvidencePreserved = true;
+                    return Task.FromResult(ActionResult.Completed("evidence preserved and chain of custody started"));
+                }
+            });
+
+            RegisterAction(new ProtocolAction
+            {
+                Name = "notify-lawful-authority",
+                Stage = ProtocolStage.EscalateSafely,
+                RequiredRole = ActorRole.Commander,
+                ExecuteAsync = (ctx, _) =>
+                {
+                    ctx.LawfulAuthorityNotified = true;
+                    return Task.FromResult(ActionResult.Completed("lawful authority notified"));
+                }
+            });
+
+            RegisterAction(new ProtocolAction
+            {
+                Name = "activate-safe-withdrawal",
+                Stage = ProtocolStage.Exit,
+                RequiredRole = ActorRole.Coordinator,
+                CanExecute = ctx => ctx.SafeWithdrawalAvailable,
+                ExecuteAsync = (ctx, _) =>
+                {
+                    ctx.Metadata["withdrawal_status"] = "active";
+                    return Task.FromResult(ActionResult.Completed("safe withdrawal route activated"));
+                }
+            });
+
+            RegisterAction(new ProtocolAction
+            {
+                Name = "generate-after-action-review",
+                Stage = ProtocolStage.Review,
+                RequiredRole = ActorRole.Auditor,
+                CanExecute = ctx => ctx.EvidencePreserved,
+                ExecuteAsync = (ctx, _) =>
+                {
+                    ctx.Metadata["review_status"] = "queued";
+                    return Task.FromResult(ActionResult.Completed("after-action review queued"));
+                }
+            });
+        }
+    }
+
+    public static class Demo
+    {
+        public static async Task Main()
+        {
+            var engine = new FraughtNightEngine();
+
+            var context = new IncidentContext
+            {
+                Title = "Downtown disturbance",
+                ThreatLevel = ThreatLevel.High,
+                Location = "Sector A",
+                CiviliansPresent = true,
+                MedicalNeedPresent = true,
+                VerifiedThreatSource = true,
+                SafeWithdrawalAvailable = true,
+                SeniorReviewGranted = true
+            };
+
+            var stageActors = new Dictionary<ProtocolStage, ActorRole>
+            {
+                [ProtocolStage.Confirm] = ActorRole.Observer,
+                [ProtocolStage.Freeze] = ActorRole.Commander,
+                [ProtocolStage.Shield] = ActorRole.SecurityLead,
+                [ProtocolStage.Separate] = ActorRole.SecurityLead,
+                [ProtocolStage.Stabilize] = ActorRole.MedicalLead,
+                [ProtocolStage.Preserve] = ActorRole.Auditor,
+                [ProtocolStage.EscalateSafely] = ActorRole.Commander,
+                [ProtocolStage.Exit] = ActorRole.Coordinator,
+                [ProtocolStage.Review] = ActorRole.Auditor
+            };
+
+            var results = await engine.RunAsync(context, stageActors);
+
+            Console.WriteLine("=== STAGE RESULTS ===");
+            foreach (var stage in results)
+            {
+                Console.WriteLine($"{stage.Stage}: {(stage.Success ? "SUCCESS" : "PARTIAL/BLOCKED")}");
+                foreach (var action in stage.ActionResults)
+                {
+                    Console.WriteLine($"  - {action.Disposition}: {action.Message}");
+                }
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("=== AUDIT TRAIL ===");
+            foreach (var evt in context.AuditTrail)
+            {
+                Console.WriteLine($"{evt.Timestamp:O} [{evt.Stage}] {evt.Message}");
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("=== CONTEXT ===");
+            Console.WriteLine(JsonSerializer.Serialize(new
+            {
+                context.IncidentId,
+                context.Title,
+                context.ThreatLevel,
+                context.Location,
+                context.CiviliansPresent,
+                context.MedicalNeedPresent,
+                context.VerifiedThreatSource,
+                context.SafeWithdrawalAvailable,
+                context.EvidencePreserved,
+                context.LawfulAuthorityNotified,
+                context.Metadata
+            }, new JsonSerializerOptions { WriteIndented = true }));
+        }
+    }
+}
