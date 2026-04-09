@@ -1,0 +1,333 @@
+// Program.cs
+// .NET 8 minimal API
+//
+// Safe use:
+// - telemetry ingest
+// - sector rotation / band mapping
+// - anomaly scoring
+// - relay-state reporting
+//
+// Not included:
+// - RF transmission control
+// - jammer logic
+// - targeting logic
+// - exploit / reverse-engineering routines
+
+using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+
+var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddSingleton<DeltaMatrixEngine>();
+builder.Services.AddSingleton<SigningService>();
+
+var app = builder.Build();
+
+app.MapGet("/", () => Results.Ok(new
+{
+    service = "DeltaTelemetryMatrix",
+    version = "1.0.0",
+    mode = "defensive-monitoring",
+    sectors = 36,
+    quadrants = 4,
+    phaseAnchorDegrees = 45.0
+}));
+
+app.MapPost("/telemetry/ingest", (
+    TelemetrySample sample,
+    DeltaMatrixEngine engine) =>
+{
+    var result = engine.Ingest(sample);
+    return Results.Ok(result);
+});
+
+app.MapGet("/matrix/state", (DeltaMatrixEngine engine) =>
+{
+    return Results.Ok(engine.GetMatrixState());
+});
+
+app.MapGet("/matrix/report", (DeltaMatrixEngine engine, SigningService signer) =>
+{
+    var report = engine.BuildReport();
+    var signed = signer.Sign(report);
+    return Results.Ok(signed);
+});
+
+app.Run();
+
+public record TelemetrySample(
+    string NodeId,
+    DateTimeOffset TimestampUtc,
+    double BearingDegrees,
+    double SignalStrength,
+    double Snr,
+    bool FrameValid,
+    bool Authenticated,
+    string RelayPath,
+    Dictionary<string, string>? Tags = null
+);
+
+public record SectorReading(
+    int SectorIndex,
+    int QuadrantIndex,
+    double RawBearingDegrees,
+    double RotatedBearingDegrees,
+    double SignalStrength,
+    double Snr,
+    bool FrameValid,
+    bool Authenticated,
+    string RelayPath,
+    DateTimeOffset TimestampUtc,
+    double HealthScore,
+    double AnomalyScore
+);
+
+public record MatrixState(
+    double RotationDegrees,
+    int SectorCount,
+    int QuadrantCount,
+    IReadOnlyList<SectorReading> ActiveReadings,
+    IReadOnlyDictionary<int, QuadrantSummary> Quadrants,
+    string RelayDisposition
+);
+
+public record QuadrantSummary(
+    int QuadrantIndex,
+    int SampleCount,
+    double AverageHealth,
+    double AverageAnomaly,
+    string Status
+);
+
+public record MatrixReport(
+    DateTimeOffset GeneratedUtc,
+    double RotationDegrees,
+    string RelayDisposition,
+    List<QuadrantSummary> Quadrants,
+    List<SectorReading> ActiveReadings,
+    Dictionary<string, object> Metrics
+);
+
+public sealed class DeltaMatrixEngine
+{
+    private const int SectorCount = 36;
+    private const int QuadrantCount = 4;
+    private const double SectorWidth = 360.0 / SectorCount; // 10 degrees
+    private const double PhaseAnchorDegrees = 45.0;
+
+    private readonly object _gate = new();
+    private readonly List<SectorReading> _recent = new();
+    private double _rotationDegrees = PhaseAnchorDegrees;
+
+    public object Ingest(TelemetrySample sample)
+    {
+        lock (_gate)
+        {
+            _rotationDegrees = ComputeRotation(sample.TimestampUtc);
+
+            var rotatedBearing = Normalize(sample.BearingDegrees + _rotationDegrees);
+            var sectorIndex = (int)Math.Floor(rotatedBearing / SectorWidth);
+            var quadrantIndex = sectorIndex / 9; // 4 quadrants * 9 sectors each
+
+            var health = ComputeHealth(sample);
+            var anomaly = ComputeAnomaly(sample);
+
+            var reading = new SectorReading(
+                SectorIndex: sectorIndex,
+                QuadrantIndex: quadrantIndex,
+                RawBearingDegrees: Normalize(sample.BearingDegrees),
+                RotatedBearingDegrees: rotatedBearing,
+                SignalStrength: sample.SignalStrength,
+                Snr: sample.Snr,
+                FrameValid: sample.FrameValid,
+                Authenticated: sample.Authenticated,
+                RelayPath: sample.RelayPath,
+                TimestampUtc: sample.TimestampUtc,
+                HealthScore: health,
+                AnomalyScore: anomaly
+            );
+
+            _recent.Add(reading);
+
+            // retain latest 360 samples
+            if (_recent.Count > 360)
+                _recent.RemoveRange(0, _recent.Count - 360);
+
+            var relayDisposition = ComputeRelayDisposition();
+
+            return new
+            {
+                ok = true,
+                reading,
+                relayDisposition,
+                rotationDegrees = _rotationDegrees
+            };
+        }
+    }
+
+    public MatrixState GetMatrixState()
+    {
+        lock (_gate)
+        {
+            var latestPerSector = _recent
+                .GroupBy(x => x.SectorIndex)
+                .Select(g => g.OrderByDescending(x => x.TimestampUtc).First())
+                .OrderBy(x => x.SectorIndex)
+                .ToList();
+
+            var quadrants = latestPerSector
+                .GroupBy(x => x.QuadrantIndex)
+                .ToDictionary(
+                    g => g.Key,
+                    g => new QuadrantSummary(
+                        QuadrantIndex: g.Key,
+                        SampleCount: g.Count(),
+                        AverageHealth: Math.Round(g.Average(x => x.HealthScore), 4),
+                        AverageAnomaly: Math.Round(g.Average(x => x.AnomalyScore), 4),
+                        Status: ResolveQuadrantStatus(g)
+                    )
+                );
+
+            return new MatrixState(
+                RotationDegrees: _rotationDegrees,
+                SectorCount: SectorCount,
+                QuadrantCount: QuadrantCount,
+                ActiveReadings: latestPerSector,
+                Quadrants: quadrants,
+                RelayDisposition: ComputeRelayDisposition()
+            );
+        }
+    }
+
+    public MatrixReport BuildReport()
+    {
+        lock (_gate)
+        {
+            var state = GetMatrixState();
+
+            var metrics = new Dictionary<string, object>
+            {
+                ["sectorCount"] = SectorCount,
+                ["quadrantCount"] = QuadrantCount,
+                ["rotationDegrees"] = state.RotationDegrees,
+                ["activeSectorCount"] = state.ActiveReadings.Count,
+                ["avgHealth"] = state.ActiveReadings.Count == 0 ? 0 : state.ActiveReadings.Average(x => x.HealthScore),
+                ["avgAnomaly"] = state.ActiveReadings.Count == 0 ? 0 : state.ActiveReadings.Average(x => x.AnomalyScore),
+                ["invalidFrames"] = state.ActiveReadings.Count(x => !x.FrameValid),
+                ["unauthenticated"] = state.ActiveReadings.Count(x => !x.Authenticated)
+            };
+
+            return new MatrixReport(
+                GeneratedUtc: DateTimeOffset.UtcNow,
+                RotationDegrees: state.RotationDegrees,
+                RelayDisposition: state.RelayDisposition,
+                Quadrants: state.Quadrants.Values.OrderBy(x => x.QuadrantIndex).ToList(),
+                ActiveReadings: state.ActiveReadings.OrderBy(x => x.SectorIndex).ToList(),
+                Metrics: metrics
+            );
+        }
+    }
+
+    private static double ComputeRotation(DateTimeOffset timestampUtc)
+    {
+        // Software-only rotating band:
+        // 45° anchor + one full revolution every 8 minutes
+        var seconds = timestampUtc.ToUnixTimeSeconds();
+        var cycle = (seconds % 480) / 480.0; // 0..1
+        return Normalize(PhaseAnchorDegrees + cycle * 360.0);
+    }
+
+    private static double ComputeHealth(TelemetrySample sample)
+    {
+        double score = 1.0;
+
+        if (!sample.FrameValid) score -= 0.35;
+        if (!sample.Authenticated) score -= 0.35;
+
+        // Soft normalization
+        score -= Clamp01((-sample.SignalStrength - 110.0) / 40.0) * 0.15;
+        score -= Clamp01((6.0 - sample.Snr) / 12.0) * 0.15;
+
+        return Math.Round(Math.Clamp(score, 0.0, 1.0), 4);
+    }
+
+    private static double ComputeAnomaly(TelemetrySample sample)
+    {
+        double score = 0.0;
+
+        if (!sample.FrameValid) score += 0.40;
+        if (!sample.Authenticated) score += 0.35;
+        if (sample.Snr < 3.0) score += 0.15;
+        if (sample.SignalStrength < -125.0) score += 0.10;
+
+        return Math.Round(Math.Clamp(score, 0.0, 1.0), 4);
+    }
+
+    private string ComputeRelayDisposition()
+    {
+        var latestPerSector = _recent
+            .GroupBy(x => x.SectorIndex)
+            .Select(g => g.OrderByDescending(x => x.TimestampUtc).First())
+            .ToList();
+
+        if (latestPerSector.Count == 0)
+            return "standby";
+
+        var avgHealth = latestPerSector.Average(x => x.HealthScore);
+        var avgAnomaly = latestPerSector.Average(x => x.AnomalyScore);
+        var unauth = latestPerSector.Count(x => !x.Authenticated);
+
+        if (unauth >= 4 || avgAnomaly >= 0.45)
+            return "restrict_to_verified_relays";
+
+        if (avgHealth < 0.55)
+            return "degraded_failover_review";
+
+        return "nominal_monitored";
+    }
+
+    private static string ResolveQuadrantStatus(IEnumerable<SectorReading> readings)
+    {
+        var avgHealth = readings.Average(x => x.HealthScore);
+        var avgAnomaly = readings.Average(x => x.AnomalyScore);
+
+        if (avgAnomaly >= 0.45) return "critical";
+        if (avgHealth < 0.60) return "degraded";
+        return "nominal";
+    }
+
+    private static double Normalize(double degrees)
+    {
+        var d = degrees % 360.0;
+        return d < 0 ? d + 360.0 : d;
+    }
+
+    private static double Clamp01(double value) => Math.Clamp(value, 0.0, 1.0);
+}
+
+public sealed class SigningService
+{
+    private readonly JsonSerializerOptions _jsonOptions = new()
+    {
+        WriteIndented = false
+    };
+
+    public object Sign(MatrixReport report)
+    {
+        var key = Environment.GetEnvironmentVariable("DELTA_MATRIX_HMAC_KEY");
+        if (string.IsNullOrWhiteSpace(key))
+            key = "development-only-change-me";
+
+        var json = JsonSerializer.Serialize(report, _jsonOptions);
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(key));
+        var sig = Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(json)));
+
+        return new
+        {
+            ok = true,
+            report,
+            signatureHex = sig
+        };
+    }
+}
