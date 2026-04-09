@@ -1,0 +1,247 @@
+use std::collections::HashSet;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccessState {
+    Open,
+    Review,
+    Restricted,
+    Denied,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntentLevel {
+    Passive,
+    Observed,
+    Committed,
+    BetsUp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PressureMode {
+    Soft,
+    Controlled,
+    Elevated,
+    Critical,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyTag {
+    Chuyu,       // connective polish
+    Dro,         // raw core pressure
+    ChuyuDro,    // refined pressure / styled execution
+    ColdSmart,   // restrained but tactical
+    SquareItUp,  // align and formalize
+    BetsUp,      // commitment is live
+    SmartAccess, // controlled entry
+}
+
+#[derive(Debug, Clone)]
+pub struct PolicyContext {
+    pub actor: String,
+    pub target: String,
+    pub requested_action: String,
+    pub intent: IntentLevel,
+    pub pressure: PressureMode,
+    pub tags: HashSet<PolicyTag>,
+    pub trust_score: f32,     // 0.0 - 1.0
+    pub clarity_score: f32,   // 0.0 - 1.0
+    pub risk_score: f32,      // 0.0 - 1.0
+    pub authentication_ok: bool,
+    pub authorization_ok: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PolicyDecision {
+    pub state: AccessState,
+    pub allow: bool,
+    pub smart_access_score: f32,
+    pub reasons: Vec<String>,
+    pub applied_policy: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChuyuDroPolicy {
+    pub name: String,
+    pub version: String,
+    pub min_trust: f32,
+    pub min_clarity: f32,
+    pub max_risk_open: f32,
+    pub max_risk_review: f32,
+}
+
+impl Default for ChuyuDroPolicy {
+    fn default() -> Self {
+        Self {
+            name: "CHUYUDRO Smart Access Policy".to_string(),
+            version: "0.1.0-draft".to_string(),
+            min_trust: 0.70,
+            min_clarity: 0.65,
+            max_risk_open: 0.35,
+            max_risk_review: 0.65,
+        }
+    }
+}
+
+impl ChuyuDroPolicy {
+    pub fn evaluate(&self, ctx: &PolicyContext) -> PolicyDecision {
+        let mut reasons = Vec::new();
+
+        if !ctx.authentication_ok {
+            reasons.push("authentication failed".to_string());
+        }
+
+        if !ctx.authorization_ok {
+            reasons.push("authorization failed".to_string());
+        }
+
+        if ctx.trust_score < self.min_trust {
+            reasons.push(format!(
+                "trust below threshold: {:.2} < {:.2}",
+                ctx.trust_score, self.min_trust
+            ));
+        }
+
+        if ctx.clarity_score < self.min_clarity {
+            reasons.push(format!(
+                "clarity below threshold: {:.2} < {:.2}",
+                ctx.clarity_score, self.min_clarity
+            ));
+        }
+
+        let smart_access_score = self.compute_smart_access_score(ctx);
+
+        // Hard deny conditions
+        if !ctx.authentication_ok || !ctx.authorization_ok {
+            return PolicyDecision {
+                state: AccessState::Denied,
+                allow: false,
+                smart_access_score,
+                reasons,
+                applied_policy: self.policy_label(),
+            };
+        }
+
+        // Critical risk handling
+        if ctx.risk_score > self.max_risk_review {
+            reasons.push(format!(
+                "risk exceeded review ceiling: {:.2} > {:.2}",
+                ctx.risk_score, self.max_risk_review
+            ));
+
+            return PolicyDecision {
+                state: AccessState::Denied,
+                allow: false,
+                smart_access_score,
+                reasons,
+                applied_policy: self.policy_label(),
+            };
+        }
+
+        // Controlled access path
+        if ctx.trust_score >= self.min_trust
+            && ctx.clarity_score >= self.min_clarity
+            && ctx.risk_score <= self.max_risk_open
+            && smart_access_score >= 0.75
+        {
+            reasons.push("meets open access conditions".to_string());
+
+            return PolicyDecision {
+                state: AccessState::Open,
+                allow: true,
+                smart_access_score,
+                reasons,
+                applied_policy: self.policy_label(),
+            };
+        }
+
+        // Review path
+        if ctx.risk_score <= self.max_risk_review && smart_access_score >= 0.45 {
+            reasons.push("requires structured review under ColdSmart handling".to_string());
+
+            return PolicyDecision {
+                state: AccessState::Review,
+                allow: true,
+                smart_access_score,
+                reasons,
+                applied_policy: self.policy_label(),
+            };
+        }
+
+        // Restricted fallback
+        reasons.push("restricted pending stronger signal, trust, or clarity".to_string());
+
+        PolicyDecision {
+            state: AccessState::Restricted,
+            allow: false,
+            smart_access_score,
+            reasons,
+            applied_policy: self.policy_label(),
+        }
+    }
+
+    fn compute_smart_access_score(&self, ctx: &PolicyContext) -> f32 {
+        let mut score =
+            (ctx.trust_score * 0.35) +
+            (ctx.clarity_score * 0.30) +
+            ((1.0 - ctx.risk_score) * 0.35);
+
+        if ctx.tags.contains(&PolicyTag::ColdSmart) {
+            score += 0.05;
+        }
+
+        if ctx.tags.contains(&PolicyTag::SquareItUp) {
+            score += 0.05;
+        }
+
+        if ctx.tags.contains(&PolicyTag::SmartAccess) {
+            score += 0.05;
+        }
+
+        if ctx.tags.contains(&PolicyTag::ChuyuDro) {
+            score += 0.05;
+        }
+
+        if ctx.tags.contains(&PolicyTag::BetsUp) && ctx.intent == IntentLevel::BetsUp {
+            score += 0.05;
+        }
+
+        score.clamp(0.0, 1.0)
+    }
+
+    fn policy_label(&self) -> String {
+        format!("{} :: {}", self.name, self.version)
+    }
+}
+
+pub fn build_default_tags() -> HashSet<PolicyTag> {
+    HashSet::from([
+        PolicyTag::Chuyu,
+        PolicyTag::Dro,
+        PolicyTag::ChuyuDro,
+        PolicyTag::ColdSmart,
+        PolicyTag::SquareItUp,
+        PolicyTag::SmartAccess,
+    ])
+}
+
+fn main() {
+    let policy = ChuyuDroPolicy::default();
+
+    let ctx = PolicyContext {
+        actor: "operator.alpha".to_string(),
+        target: "secure_portfolio_route".to_string(),
+        requested_action: "smart_access_open".to_string(),
+        intent: IntentLevel::Committed,
+        pressure: PressureMode::Controlled,
+        tags: build_default_tags(),
+        trust_score: 0.82,
+        clarity_score: 0.79,
+        risk_score: 0.28,
+        authentication_ok: true,
+        authorization_ok: true,
+    };
+
+    let decision = policy.evaluate(&ctx);
+
+    println!("Decision: {:#?}", decision);
+}
