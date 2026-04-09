@@ -225,3 +225,53 @@ namespace DistressExt5
         }
     }
 }
+
+public DistressAssessment Assess(SubjectState state)
+{
+    if (string.IsNullOrEmpty(state.SubjectId))
+        throw new ArgumentException("SubjectId cannot be empty.");
+
+    foreach (var e in state.Events)
+    {
+        if (e.Weight < 0 || e.Weight > 1)
+            throw new ArgumentException("Weight must be between 0 and 1.");
+        if (e.Timestamp > DateTimeOffset.UtcNow)
+            throw new ArgumentException("Timestamp cannot be in the future.");
+    }
+    // ... rest of the logic
+}
+
+public DistressAssessment Assess(SubjectState state, int daysLookback = 14)
+{
+    var recent = state.Events
+        .Where(e => e.Timestamp >= DateTimeOffset.UtcNow.AddDays(-daysLookback))
+        .ToList();
+    // ...
+}
+
+foreach (var e in recent)
+{
+    double daysOld = (DateTimeOffset.UtcNow - e.Timestamp).TotalDays;
+    e.Weight *= Math.Max(0, 1 - daysOld / 14); // Linear decay over 14 days
+}
+
+public class DistressEngine
+{
+    public double Ext5DistressThreshold { get; set; } = 0.65;
+    public double Ext5CorroborationThreshold { get; set; } = 0.25;
+    public double ModerateDistressThreshold { get; set; } = 0.45;
+    public double LowDistressThreshold { get; set; } = 0.30;
+    // ...
+}
+
+public DistressAssessment Assess(SubjectState state)
+{
+    var result = new DistressAssessment();
+    // ... assessment logic ...
+    Console.WriteLine($"Assessment for {state.SubjectId}: " +
+                      $"Distress={result.DistressScore:F2}, " +
+                      $"Path={result.Path}");
+    return result;
+}
+
+
