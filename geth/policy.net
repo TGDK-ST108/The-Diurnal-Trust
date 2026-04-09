@@ -1,0 +1,13 @@
+// example policy use
+var output = PmzMath.ComputeReturnRatio(
+    d: 3.001288910744936m,
+    pmz: 1.4873306944955302m,
+    intro: 1.3332m,
+    outro: 0.4444m,
+    dualState: 0m,
+    centroid: 0.8888m);
+
+if (!PmzMath.IsMintableWindow(output))
+{
+    throw new InvalidOperationException("PMZ policy rejected mint.");
+}
