@@ -1,0 +1,713 @@
+// ConcordiaProtocol.cs
+// Target: .NET Framework 4.8
+//
+// Safe purpose:
+// - govern agentic AI units that handle sensitive case records
+// - exclude uninvolved civilians by default
+// - mask identifiers
+// - require human review before retention
+// - prevent autonomous export/contact/escalation
+// - emit signed directives for AI units
+//
+// NuGet:
+//   Newtonsoft.Json
+//
+// AppSettings expected:
+//   <add key="CONCORDIA_HMAC_KEY" value="replace-with-long-random-hmac-key" />
+//   <add key="CONCORDIA_AES_KEY" value="replace-with-long-random-aes-key" />
+
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Configuration;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using Newtonsoft.Json;
+
+namespace ProgenticAI.USA0METFORCE.Concordia
+{
+    public enum ConcordiaDisposition
+    {
+        Excluded = 0,
+        PendingReview = 1,
+        Retained = 2,
+        Purged = 3
+    }
+
+    public enum ConcordiaDirectiveAction
+    {
+        ExcludeRecord = 0,
+        MaskAndHold = 1,
+        QueueHumanReview = 2,
+        RetainRecord = 3,
+        PurgeRecord = 4
+    }
+
+    public sealed class ConcordiaIntakeRequest
+    {
+        public string CaseId { get; set; }
+        public string Actor { get; set; }
+        public string UnitId { get; set; }
+        public string Relation { get; set; }
+        public double EvidenceScore { get; set; }
+        public SubjectPayload Subject { get; set; }
+        public Dictionary<string, string> Tags { get; set; }
+    }
+
+    public sealed class SubjectPayload
+    {
+        public string FullName { get; set; }
+        public string DateOfBirth { get; set; }
+        public string Email { get; set; }
+        public string Phone { get; set; }
+        public string Notes { get; set; }
+    }
+
+    public sealed class ReviewRequest
+    {
+        public string Actor { get; set; }
+        public string Reason { get; set; }
+    }
+
+    public sealed class ConcordiaDirectiveEnvelope
+    {
+        public string EnvelopeId { get; set; }
+        public DateTime CreatedUtc { get; set; }
+        public string Protocol { get; set; }
+        public string Program { get; set; }
+        public string CaseId { get; set; }
+        public string RecordId { get; set; }
+        public string UnitId { get; set; }
+        public ConcordiaDirectiveAction Action { get; set; }
+        public string Rationale { get; set; }
+        public Dictionary<string, object> Constraints { get; set; }
+        public string SignatureHex { get; set; }
+    }
+
+    public sealed class ConcordiaRecord
+    {
+        public string RecordId { get; set; }
+        public string CaseId { get; set; }
+        public string UnitId { get; set; }
+        public string TokenId { get; set; }
+        public string FullNameMasked { get; set; }
+        public string Relation { get; set; }
+        public double EvidenceScore { get; set; }
+        public double RelevanceScore { get; set; }
+        public ConcordiaDisposition Disposition { get; set; }
+        public DateTime CreatedUtc { get; set; }
+        public DateTime PurgeAtUtc { get; set; }
+        public DateTime? ReviewedUtc { get; set; }
+        public string Reviewer { get; set; }
+        public string Justification { get; set; }
+        public string EncryptedSubjectJson { get; set; }
+        public Dictionary<string, string> Tags { get; set; }
+    }
+
+    public sealed class ConcordiaAuditEvent
+    {
+        public string EventId { get; set; }
+        public string CaseId { get; set; }
+        public string RecordId { get; set; }
+        public string UnitId { get; set; }
+        public string Action { get; set; }
+        public string Actor { get; set; }
+        public DateTime TimestampUtc { get; set; }
+        public string Notes { get; set; }
+    }
+
+    public sealed class ConcordiaCaseFile
+    {
+        public string CaseId { get; set; }
+        public DateTime CreatedUtc { get; set; }
+        public ConcurrentDictionary<string, ConcordiaRecord> Records { get; private set; }
+        public List<ConcordiaAuditEvent> Audit { get; private set; }
+
+        public ConcordiaCaseFile()
+        {
+            Records = new ConcurrentDictionary<string, ConcordiaRecord>(StringComparer.OrdinalIgnoreCase);
+            Audit = new List<ConcordiaAuditEvent>();
+        }
+    }
+
+    public sealed class ConcordiaPolicyProfile
+    {
+        public bool AllowExport { get; set; }
+        public bool AllowContact { get; set; }
+        public bool AllowAutonomousEscalation { get; set; }
+        public bool RequireHumanReview { get; set; }
+        public bool MaskIdentifiers { get; set; }
+        public bool EncryptPayload { get; set; }
+    }
+
+    public sealed class ConcordiaEngine
+    {
+        private readonly ConcurrentDictionary<string, ConcordiaCaseFile> _cases =
+            new ConcurrentDictionary<string, ConcordiaCaseFile>(StringComparer.OrdinalIgnoreCase);
+
+        private readonly ConcordiaCrypto _crypto = new ConcordiaCrypto();
+
+        public object Intake(ConcordiaIntakeRequest req)
+        {
+            ValidateIntake(req);
+
+            var now = DateTime.UtcNow;
+            var caseFile = _cases.GetOrAdd(req.CaseId, id => new ConcordiaCaseFile
+            {
+                CaseId = id,
+                CreatedUtc = now
+            });
+
+            var relevance = ComputeRelevance(req.Relation, req.EvidenceScore, req.Tags);
+            var disposition = ComputeDisposition(req.Relation, req.EvidenceScore, relevance);
+            var policy = BuildPolicy(disposition);
+
+            var tokenId = _crypto.Tokenize(
+                req.Subject != null ? req.Subject.FullName : null,
+                req.Subject != null ? req.Subject.DateOfBirth : null,
+                req.Subject != null ? req.Subject.Email : null,
+                req.Subject != null ? req.Subject.Phone : null
+            );
+
+            var record = new ConcordiaRecord
+            {
+                RecordId = "rec_" + Guid.NewGuid().ToString("N"),
+                CaseId = req.CaseId,
+                UnitId = Safe(req.UnitId, "unit.unknown"),
+                TokenId = tokenId,
+                FullNameMasked = MaskName(req.Subject != null ? req.Subject.FullName : null),
+                Relation = Safe(req.Relation, "unknown"),
+                EvidenceScore = Clamp(req.EvidenceScore),
+                RelevanceScore = relevance,
+                Disposition = disposition,
+                CreatedUtc = now,
+                PurgeAtUtc = disposition == ConcordiaDisposition.Excluded ? now.AddDays(30) : now.AddDays(180),
+                ReviewedUtc = null,
+                Reviewer = null,
+                Justification = BuildJustification(disposition, relevance, req.EvidenceScore, req.Relation),
+                EncryptedSubjectJson = policy.EncryptPayload ? _crypto.EncryptObject(req.Subject) : null,
+                Tags = req.Tags ?? new Dictionary<string, string>()
+            };
+
+            caseFile.Records[record.RecordId] = record;
+
+            AppendAudit(caseFile, new ConcordiaAuditEvent
+            {
+                EventId = "aud_" + Guid.NewGuid().ToString("N"),
+                CaseId = record.CaseId,
+                RecordId = record.RecordId,
+                UnitId = record.UnitId,
+                Action = "intake",
+                Actor = Safe(req.Actor, "system"),
+                TimestampUtc = now,
+                Notes = record.Justification
+            });
+
+            var directive = BuildDirective(record, disposition, "initial-policy-evaluation", policy);
+
+            return new
+            {
+                ok = true,
+                caseId = record.CaseId,
+                recordId = record.RecordId,
+                tokenId = record.TokenId,
+                maskedName = record.FullNameMasked,
+                disposition = record.Disposition.ToString(),
+                relevanceScore = record.RelevanceScore,
+                purgeAtUtc = record.PurgeAtUtc,
+                directive = directive
+            };
+        }
+
+        public object Retain(string caseId, string recordId, ReviewRequest req)
+        {
+            var record = RequireRecord(caseId, recordId);
+
+            record.Disposition = ConcordiaDisposition.Retained;
+            record.Reviewer = Safe(req != null ? req.Actor : null, "reviewer.unknown");
+            record.ReviewedUtc = DateTime.UtcNow;
+            record.PurgeAtUtc = DateTime.UtcNow.AddDays(365);
+            record.Justification = "Retained after review: " + Safe(req != null ? req.Reason : null, "no reason provided");
+
+            var caseFile = _cases[caseId];
+            AppendAudit(caseFile, new ConcordiaAuditEvent
+            {
+                EventId = "aud_" + Guid.NewGuid().ToString("N"),
+                CaseId = caseId,
+                RecordId = recordId,
+                UnitId = record.UnitId,
+                Action = "retain",
+                Actor = record.Reviewer,
+                TimestampUtc = DateTime.UtcNow,
+                Notes = record.Justification
+            });
+
+            var policy = BuildPolicy(ConcordiaDisposition.Retained);
+
+            return new
+            {
+                ok = true,
+                caseId = caseId,
+                recordId = recordId,
+                disposition = record.Disposition.ToString(),
+                directive = BuildDirective(record, ConcordiaDisposition.Retained, "human-review-approved", policy)
+            };
+        }
+
+        public object Purge(string caseId, string recordId, ReviewRequest req)
+        {
+            var record = RequireRecord(caseId, recordId);
+
+            record.Disposition = ConcordiaDisposition.Purged;
+            record.Reviewer = Safe(req != null ? req.Actor : null, "reviewer.unknown");
+            record.ReviewedUtc = DateTime.UtcNow;
+            record.EncryptedSubjectJson = null;
+            record.Tags = new Dictionary<string, string>();
+            record.Justification = "Purged: " + Safe(req != null ? req.Reason : null, "no reason provided");
+
+            var caseFile = _cases[caseId];
+            AppendAudit(caseFile, new ConcordiaAuditEvent
+            {
+                EventId = "aud_" + Guid.NewGuid().ToString("N"),
+                CaseId = caseId,
+                RecordId = recordId,
+                UnitId = record.UnitId,
+                Action = "purge",
+                Actor = record.Reviewer,
+                TimestampUtc = DateTime.UtcNow,
+                Notes = record.Justification
+            });
+
+            var policy = BuildPolicy(ConcordiaDisposition.Purged);
+
+            return new
+            {
+                ok = true,
+                caseId = caseId,
+                recordId = recordId,
+                disposition = record.Disposition.ToString(),
+                directive = BuildDirective(record, ConcordiaDisposition.Purged, "human-review-purge", policy)
+            };
+        }
+
+        public object PurgeExpired()
+        {
+            var now = DateTime.UtcNow;
+            var touched = new List<object>();
+
+            foreach (var pair in _cases)
+            {
+                var caseFile = pair.Value;
+
+                foreach (var recPair in caseFile.Records)
+                {
+                    var record = recPair.Value;
+                    if (record.Disposition != ConcordiaDisposition.Purged && record.PurgeAtUtc <= now)
+                    {
+                        record.Disposition = ConcordiaDisposition.Purged;
+                        record.EncryptedSubjectJson = null;
+                        record.Tags = new Dictionary<string, string>();
+                        record.ReviewedUtc = now;
+                        record.Reviewer = "system";
+                        record.Justification = "Auto-purged by retention policy.";
+
+                        AppendAudit(caseFile, new ConcordiaAuditEvent
+                        {
+                            EventId = "aud_" + Guid.NewGuid().ToString("N"),
+                            CaseId = record.CaseId,
+                            RecordId = record.RecordId,
+                            UnitId = record.UnitId,
+                            Action = "auto_purge",
+                            Actor = "system",
+                            TimestampUtc = now,
+                            Notes = "Retention window expired."
+                        });
+
+                        touched.Add(new
+                        {
+                            caseId = record.CaseId,
+                            recordId = record.RecordId,
+                            unitId = record.UnitId,
+                            disposition = record.Disposition.ToString()
+                        });
+                    }
+                }
+            }
+
+            return new
+            {
+                ok = true,
+                purgedCount = touched.Count,
+                records = touched
+            };
+        }
+
+        public object GetCase(string caseId)
+        {
+            ConcordiaCaseFile caseFile;
+            if (!_cases.TryGetValue(caseId, out caseFile))
+                return new { ok = false, error = "case_not_found" };
+
+            var records = caseFile.Records.Values
+                .OrderByDescending(x => x.CreatedUtc)
+                .Select(x => new
+                {
+                    x.RecordId,
+                    x.UnitId,
+                    x.TokenId,
+                    x.FullNameMasked,
+                    x.Relation,
+                    x.EvidenceScore,
+                    x.RelevanceScore,
+                    disposition = x.Disposition.ToString(),
+                    x.CreatedUtc,
+                    x.PurgeAtUtc,
+                    x.ReviewedUtc,
+                    x.Reviewer,
+                    x.Justification,
+                    x.Tags
+                })
+                .ToList();
+
+            return new
+            {
+                ok = true,
+                caseId = caseId,
+                createdUtc = caseFile.CreatedUtc,
+                counts = new
+                {
+                    total = records.Count,
+                    excluded = records.Count(x => x.disposition == "Excluded"),
+                    pending = records.Count(x => x.disposition == "PendingReview"),
+                    retained = records.Count(x => x.disposition == "Retained"),
+                    purged = records.Count(x => x.disposition == "Purged")
+                },
+                records = records
+            };
+        }
+
+        public object GetAudit(string caseId)
+        {
+            ConcordiaCaseFile caseFile;
+            if (!_cases.TryGetValue(caseId, out caseFile))
+                return new { ok = false, error = "case_not_found" };
+
+            lock (caseFile.Audit)
+            {
+                return new
+                {
+                    ok = true,
+                    caseId = caseId,
+                    events = caseFile.Audit
+                        .OrderByDescending(x => x.TimestampUtc)
+                        .Select(x => new
+                        {
+                            x.EventId,
+                            x.RecordId,
+                            x.UnitId,
+                            x.Action,
+                            x.Actor,
+                            x.TimestampUtc,
+                            x.Notes
+                        })
+                        .ToList()
+                };
+            }
+        }
+
+        private ConcordiaPolicyProfile BuildPolicy(ConcordiaDisposition disposition)
+        {
+            switch (disposition)
+            {
+                case ConcordiaDisposition.Excluded:
+                    return new ConcordiaPolicyProfile
+                    {
+                        AllowExport = false,
+                        AllowContact = false,
+                        AllowAutonomousEscalation = false,
+                        RequireHumanReview = false,
+                        MaskIdentifiers = true,
+                        EncryptPayload = false
+                    };
+
+                case ConcordiaDisposition.PendingReview:
+                    return new ConcordiaPolicyProfile
+                    {
+                        AllowExport = false,
+                        AllowContact = false,
+                        AllowAutonomousEscalation = false,
+                        RequireHumanReview = true,
+                        MaskIdentifiers = true,
+                        EncryptPayload = true
+                    };
+
+                case ConcordiaDisposition.Retained:
+                    return new ConcordiaPolicyProfile
+                    {
+                        AllowExport = false,
+                        AllowContact = false,
+                        AllowAutonomousEscalation = false,
+                        RequireHumanReview = false,
+                        MaskIdentifiers = true,
+                        EncryptPayload = true
+                    };
+
+                default:
+                    return new ConcordiaPolicyProfile
+                    {
+                        AllowExport = false,
+                        AllowContact = false,
+                        AllowAutonomousEscalation = false,
+                        RequireHumanReview = false,
+                        MaskIdentifiers = true,
+                        EncryptPayload = false
+                    };
+            }
+        }
+
+        private ConcordiaDirectiveEnvelope BuildDirective(
+            ConcordiaRecord record,
+            ConcordiaDisposition disposition,
+            string rationale,
+            ConcordiaPolicyProfile policy)
+        {
+            ConcordiaDirectiveAction action;
+            switch (disposition)
+            {
+                case ConcordiaDisposition.Excluded:
+                    action = ConcordiaDirectiveAction.ExcludeRecord;
+                    break;
+                case ConcordiaDisposition.PendingReview:
+                    action = ConcordiaDirectiveAction.QueueHumanReview;
+                    break;
+                case ConcordiaDisposition.Retained:
+                    action = ConcordiaDirectiveAction.RetainRecord;
+                    break;
+                case ConcordiaDisposition.Purged:
+                default:
+                    action = ConcordiaDirectiveAction.PurgeRecord;
+                    break;
+            }
+
+            var constraints = new Dictionary<string, object>
+            {
+                { "maskIdentifiers", policy.MaskIdentifiers },
+                { "exportAllowed", policy.AllowExport },
+                { "contactAllowed", policy.AllowContact },
+                { "autonomousEscalationAllowed", policy.AllowAutonomousEscalation },
+                { "humanReviewRequired", policy.RequireHumanReview },
+                { "program", "Progentic AI::USA0METFORCE" }
+            };
+
+            if (disposition == ConcordiaDisposition.Excluded)
+                constraints["autoPurgeOn"] = record.PurgeAtUtc.ToString("o");
+
+            if (disposition == ConcordiaDisposition.Purged)
+                constraints["deleteSensitivePayload"] = true;
+
+            var envelope = new ConcordiaDirectiveEnvelope
+            {
+                EnvelopeId = "env_" + Guid.NewGuid().ToString("N"),
+                CreatedUtc = DateTime.UtcNow,
+                Protocol = "!CONCORDIA/1.0",
+                Program = "Progentic AI::USA0METFORCE",
+                CaseId = record.CaseId,
+                RecordId = record.RecordId,
+                UnitId = record.UnitId,
+                Action = action,
+                Rationale = rationale,
+                Constraints = constraints
+            };
+
+            envelope.SignatureHex = _crypto.SignObject(new
+            {
+                envelope.EnvelopeId,
+                envelope.CreatedUtc,
+                envelope.Protocol,
+                envelope.Program,
+                envelope.CaseId,
+                envelope.RecordId,
+                envelope.UnitId,
+                Action = envelope.Action.ToString(),
+                envelope.Rationale,
+                envelope.Constraints
+            });
+
+            return envelope;
+        }
+
+        private static string BuildJustification(ConcordiaDisposition disposition, double relevance, double evidence, string relation)
+        {
+            if (disposition == ConcordiaDisposition.Excluded)
+            {
+                return string.Format(
+                    "Excluded by !CONCORDIA default policy. relation={0}, evidence={1:F2}, relevance={2:F2}",
+                    Safe(relation, "unknown"), evidence, relevance);
+            }
+
+            return string.Format(
+                "Pending human review under !CONCORDIA. relation={0}, evidence={1:F2}, relevance={2:F2}",
+                Safe(relation, "unknown"), evidence, relevance);
+        }
+
+        private static double ComputeRelevance(string relation, double evidence, Dictionary<string, string> tags)
+        {
+            double relationWeight;
+            switch (Safe(relation, "unknown").ToLowerInvariant())
+            {
+                case "primary_subject": relationWeight = 1.00; break;
+                case "victim": relationWeight = 0.95; break;
+                case "direct_witness": relationWeight = 0.85; break;
+                case "investigator": relationWeight = 0.70; break;
+                case "associate": relationWeight = 0.45; break;
+                case "bystander": relationWeight = 0.10; break;
+                case "collateral": relationWeight = 0.00; break;
+                default: relationWeight = 0.05; break;
+            }
+
+            var evidenceWeight = Clamp(evidence);
+            var tagWeight = (tags != null && tags.Count > 0) ? 0.05 : 0.0;
+
+            return Math.Round(Clamp((relationWeight * 0.65) + (evidenceWeight * 0.30) + tagWeight), 4);
+        }
+
+        private static ConcordiaDisposition ComputeDisposition(string relation, double evidence, double relevance)
+        {
+            var rel = Safe(relation, "unknown").ToLowerInvariant();
+            var lowRelation = rel == "bystander" || rel == "collateral" || rel == "unknown";
+
+            if (lowRelation || evidence < 0.50 || relevance < 0.55)
+                return ConcordiaDisposition.Excluded;
+
+            return ConcordiaDisposition.PendingReview;
+        }
+
+        private static string MaskName(string fullName)
+        {
+            if (string.IsNullOrWhiteSpace(fullName))
+                return "REDACTED";
+
+            var parts = fullName.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 1)
+                return parts[0].Substring(0, 1) + "***";
+
+            return string.Join(" ", parts.Select((p, i) =>
+                i == parts.Length - 1 ? p.Substring(0, 1) + "***" : p));
+        }
+
+        private static double Clamp(double value)
+        {
+            if (value < 0.0) return 0.0;
+            if (value > 1.0) return 1.0;
+            return value;
+        }
+
+        private static string Safe(string value, string fallback)
+        {
+            return string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+        }
+
+        private void AppendAudit(ConcordiaCaseFile caseFile, ConcordiaAuditEvent evt)
+        {
+            lock (caseFile.Audit)
+            {
+                caseFile.Audit.Add(evt);
+            }
+        }
+
+        private ConcordiaRecord RequireRecord(string caseId, string recordId)
+        {
+            ConcordiaCaseFile caseFile;
+            if (!_cases.TryGetValue(caseId, out caseFile))
+                throw new InvalidOperationException("case_not_found");
+
+            ConcordiaRecord record;
+            if (!caseFile.Records.TryGetValue(recordId, out record))
+                throw new InvalidOperationException("record_not_found");
+
+            return record;
+        }
+
+        private static void ValidateIntake(ConcordiaIntakeRequest req)
+        {
+            if (req == null) throw new ArgumentNullException("req");
+            if (string.IsNullOrWhiteSpace(req.CaseId)) throw new ArgumentException("CaseId is required.");
+            if (req.Subject == null) throw new ArgumentException("Subject is required.");
+        }
+    }
+
+    public sealed class ConcordiaCrypto
+    {
+        private readonly byte[] _hmacKey;
+        private readonly byte[] _aesKey;
+
+        public ConcordiaCrypto()
+        {
+            _hmacKey = SHA256.Create().ComputeHash(
+                Encoding.UTF8.GetBytes(ReadAppSetting("CONCORDIA_HMAC_KEY", "dev-hmac-key-change-me")));
+
+            _aesKey = SHA256.Create().ComputeHash(
+                Encoding.UTF8.GetBytes(ReadAppSetting("CONCORDIA_AES_KEY", "dev-aes-key-change-me")));
+        }
+
+        public string Tokenize(params string[] values)
+        {
+            var joined = string.Join("|", values.Select(v => (v ?? "").Trim().ToLowerInvariant()));
+            using (var hmac = new HMACSHA256(_hmacKey))
+            {
+                var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(joined));
+                return BitConverter.ToString(hash).Replace("-", "").Substring(0, 24);
+            }
+        }
+
+        public string SignObject(object value)
+        {
+            var json = JsonConvert.SerializeObject(value);
+            using (var hmac = new HMACSHA256(_hmacKey))
+            {
+                var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(json));
+                return BitConverter.ToString(hash).Replace("-", "");
+            }
+        }
+
+        public string EncryptObject(object value)
+        {
+            var plaintext = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(value));
+
+            using (var aes = Aes.Create())
+            {
+                aes.Key = _aesKey;
+                aes.Mode = CipherMode.CBC;
+                aes.Padding = PaddingMode.PKCS7;
+                aes.GenerateIV();
+
+                byte[] cipher;
+                using (var encryptor = aes.CreateEncryptor(aes.Key, aes.IV))
+                {
+                    cipher = encryptor.TransformFinalBlock(plaintext, 0, plaintext.Length);
+                }
+
+                var combined = new byte[aes.IV.Length + cipher.Length];
+                Buffer.BlockCopy(aes.IV, 0, combined, 0, aes.IV.Length);
+                Buffer.BlockCopy(cipher, 0, combined, aes.IV.Length, cipher.Length);
+
+                var payload = Convert.ToBase64String(combined);
+                var mac = SignObject(payload);
+
+                return JsonConvert.SerializeObject(new
+                {
+                    alg = "AES-CBC+HMACSHA256",
+                    payload = payload,
+                    mac = mac
+                });
+            }
+        }
+
+        private static string ReadAppSetting(string key, string fallback)
+        {
+            var value = ConfigurationManager.AppSettings[key];
+            return string.IsNullOrWhiteSpace(value) ? fallback : value;
+        }
+    }
+}
