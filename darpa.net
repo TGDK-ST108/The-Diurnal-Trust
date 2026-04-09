@@ -1,0 +1,148 @@
+import json
+import os
+from typing import Any, Dict
+
+# -------------------------
+# Custom witness rule action
+# -------------------------
+def precision_mastery_action(ctx):
+    ctx.add_witness_xp(15)
+    ctx.log("witness_feedback", feedback="Precision mastery unlocked! +15 XP")
+
+def endurance_warning_action(ctx):
+    ctx.log("witness_feedback", feedback="Warning: Endurance critically low!")
+
+# -------------------------
+# Monitoring hooks
+# -------------------------
+def monitor_access_denied(ctx, decision):
+    print(
+        f"Monitoring: access_denied | user={ctx.user_id} | "
+        f"role={ctx.role} | reason={decision.reason}"
+    )
+
+def monitor_tool_denied(ctx, tool):
+    print(
+        f"Monitoring: tool_denied | user={ctx.user_id} | "
+        f"role={ctx.role} | tool={tool}"
+    )
+
+# -------------------------
+# Policy override
+# -------------------------
+class CustomCommandPolicy(CommandPolicy):
+    def decide(self, ctx: CommandContext) -> AccessDecision:
+        # Adjust risk for urgent analyze/draft commands
+        if ctx.command in ["analyze", "draft"] and ctx.metadata.get("urgent"):
+            ctx.risk_score += 1
+            ctx.log("risk_adjusted", reason="urgent_command", new_risk=ctx.risk_score)
+
+        return super().decide(ctx)
+
+# -------------------------
+# Extend tool registry
+# -------------------------
+class CustomMistralCommandPolicyAIO(MistralCommandPolicyAIO):
+    def _build_tool_registry(self, ctx: CommandContext, decision: AccessDecision):
+        tools, registry = super()._build_tool_registry(ctx, decision)
+
+        if "custom_analyzer" in decision.allowed_tools:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "custom_analyzer",
+                        "description": "Run a custom analysis tool.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "dataset_name": {
+                                    "type": "string",
+                                    "description": "Name of the dataset to analyze"
+                                }
+                            },
+                            "required": ["dataset_name"],
+                        },
+                    },
+                }
+            )
+
+            def custom_analyzer(dataset_name: str) -> str:
+                return json.dumps(
+                    {
+                        "result": "analysis_complete",
+                        "dataset_name": dataset_name,
+                    }
+                )
+
+            registry["custom_analyzer"] = custom_analyzer
+
+        return tools, registry
+
+# -------------------------
+# Boot
+# -------------------------
+api_key = os.environ["MISTRAL_API_KEY"]
+
+aio = CustomMistralCommandPolicyAIO(
+    api_key=api_key,
+    model="mistral-medium-latest",
+    policy=CustomCommandPolicy(
+        role_permissions={
+            "viewer": {
+                "commands": ["summarize", "explain", "classify"],
+                "tools": ["get_policy_snapshot"],
+            },
+            "operator": {
+                "commands": ["summarize", "explain", "classify", "analyze", "draft"],
+                "tools": ["get_policy_snapshot", "log_witness_feedback", "custom_analyzer"],
+            },
+            "admin": {
+                "commands": ["*"],
+                "tools": ["get_policy_snapshot", "log_witness_feedback", "custom_analyzer"],
+            },
+        }
+    ),
+)
+
+# -------------------------
+# Add custom witness rules
+# -------------------------
+aio.add_witness_rule(
+    WitnessRule(
+        name="precision_mastery",
+        trigger_condition=lambda ctx: ctx.strengths.get("precision", 0) > 6,
+        action=precision_mastery_action,
+    )
+)
+
+aio.add_witness_rule(
+    WitnessRule(
+        name="endurance_warning",
+        trigger_condition=lambda ctx: ctx.weaknesses.get("endurance", 0) > 5,
+        action=endurance_warning_action,
+    )
+)
+
+# -------------------------
+# Attach monitoring
+# -------------------------
+aio.event_bus.on("access_denied", monitor_access_denied)
+aio.event_bus.on("tool_denied", monitor_tool_denied)
+
+# -------------------------
+# Run
+# -------------------------
+result = aio.run(
+    user_id="operator_01",
+    role="operator",
+    command="analyze",
+    prompt="Analyze this dataset for anomalies.",
+    requested_tools=["get_policy_snapshot", "log_witness_feedback", "custom_analyzer"],
+    strengths={"offense": 3, "precision": 7},
+    weaknesses={"endurance": 6},
+    risk_score=2,
+    metadata={"urgent": True},
+)
+
+print(json.dumps(result, indent=2))
