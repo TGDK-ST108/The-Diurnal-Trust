@@ -1,0 +1,145 @@
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Vec3 {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+impl Vec3 {
+    fn new(x: f64, y: f64, z: f64) -> Self {
+        Self { x, y, z }
+    }
+
+    fn add(self, other: Self) -> Self {
+        Self::new(self.x + other.x, self.y + other.y, self.z + other.z)
+    }
+
+    fn sub(self, other: Self) -> Self {
+        Self::new(self.x - other.x, self.y - other.y, self.z - other.z)
+    }
+
+    fn scale(self, k: f64) -> Self {
+        Self::new(self.x * k, self.y * k, self.z * k)
+    }
+
+    fn length(self) -> f64 {
+        (self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
+    }
+
+    fn normalize(self) -> Self {
+        let len = self.length();
+        if len == 0.0 {
+            Self::new(0.0, 0.0, 0.0)
+        } else {
+            self.scale(1.0 / len)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SmartFoldWeights {
+    alpha: f64,  // fold weight
+    beta: f64,   // triangulation weight
+    gamma: f64,  // cosplay/mask weight
+    lambda: f64, // risk penalty
+    mask_gain: f64,
+}
+
+impl Default for SmartFoldWeights {
+    fn default() -> Self {
+        Self {
+            alpha: 0.40,
+            beta: 0.35,
+            gamma: 0.20,
+            lambda: 0.25,
+            mask_gain: 0.85,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DeltaComplexTarget {
+    raw: Vec3,
+    normalized: Vec3,
+    confidence: f64,
+}
+
+fn fold_signal(signal: Vec3) -> Vec3 {
+    Vec3::new(
+        signal.x + signal.y,
+        signal.y + signal.z,
+        signal.z + signal.x,
+    )
+}
+
+fn triangulate(a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
+    a.add(b).add(c).scale(1.0 / 3.0)
+}
+
+fn apply_cosplay_mask(presentation: Vec3, mask_gain: f64) -> Vec3 {
+    presentation.scale(mask_gain)
+}
+
+fn confidence_score(raw: Vec3, risk: f64) -> f64 {
+    let energy = raw.length();
+    let score = (energy / (1.0 + risk)).tanh();
+    score.clamp(0.0, 1.0)
+}
+
+fn triangulate_to_delta_complex_target(
+    signal: Vec3,
+    anchor_a: Vec3,
+    anchor_b: Vec3,
+    anchor_c: Vec3,
+    presentation: Vec3,
+    risk: Vec3,
+    weights: SmartFoldWeights,
+) -> DeltaComplexTarget {
+    let folded = fold_signal(signal).scale(weights.alpha);
+    let tri = triangulate(anchor_a, anchor_b, anchor_c).scale(weights.beta);
+    let mask = apply_cosplay_mask(presentation, weights.mask_gain).scale(weights.gamma);
+    let risk_penalty = risk.scale(weights.lambda);
+
+    let raw = folded.add(tri).add(mask).sub(risk_penalty);
+    let normalized = raw.normalize();
+    let confidence = confidence_score(raw, risk.length());
+
+    DeltaComplexTarget {
+        raw,
+        normalized,
+        confidence,
+    }
+}
+
+fn main() {
+    let weights = SmartFoldWeights::default();
+
+    // Core signal: intent / clarity / pressure
+    let signal = Vec3::new(0.82, 0.74, 0.91);
+
+    // Three anchors for triangulation
+    let anchor_a = Vec3::new(0.70, 0.90, 0.60);
+    let anchor_b = Vec3::new(0.88, 0.68, 0.79);
+    let anchor_c = Vec3::new(0.76, 0.84, 0.83);
+
+    // "Cosplay" layer = presentation / posture / style-mask
+    let presentation = Vec3::new(0.66, 0.72, 0.80);
+
+    // Drift / contradiction / risk
+    let risk = Vec3::new(0.14, 0.09, 0.18);
+
+    let target = triangulate_to_delta_complex_target(
+        signal,
+        anchor_a,
+        anchor_b,
+        anchor_c,
+        presentation,
+        risk,
+        weights,
+    );
+
+    println!("Delta Complex Target:");
+    println!("raw        = {:?}", target.raw);
+    println!("normalized = {:?}", target.normalized);
+    println!("confidence = {:.4}", target.confidence);
+}
