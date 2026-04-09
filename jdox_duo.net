@@ -1,0 +1,52 @@
+public enum OverrideDisposition
+{
+    Pending,
+    Approved,
+    Denied,
+    Expired,
+    Revoked
+}
+
+public sealed class JdoxDuoOverrideRequest
+{
+    public string RequestId { get; set; } = Guid.NewGuid().ToString("N");
+    public string SubjectId { get; set; } = "";
+    public string RequestedBy { get; set; } = "";
+    public string LegalBasis { get; set; } = "";
+    public string PolicyBasis { get; set; } = "";
+    public string Reason { get; set; } = "";
+    public string Scope { get; set; } = "";
+    public DateTimeOffset RequestedUtc { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset ExpiresUtc { get; set; }
+    public OverrideDisposition Disposition { get; set; } = OverrideDisposition.Pending;
+    public List<JdoxApproval> Approvals { get; set; } = new();
+}
+
+public sealed class JdoxApproval
+{
+    public string ApproverId { get; set; } = "";
+    public string Role { get; set; } = ""; // e.g. Legal, Compliance, Ops
+    public bool Approved { get; set; }
+    public string Notes { get; set; } = "";
+    public DateTimeOffset ActionUtc { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public static class JdoxDuoPolicy
+{
+    public static bool CanActivate(JdoxDuoOverrideRequest req)
+    {
+        if (req.ExpiresUtc <= DateTimeOffset.UtcNow) return false;
+        if (string.IsNullOrWhiteSpace(req.LegalBasis)) return false;
+        if (string.IsNullOrWhiteSpace(req.PolicyBasis)) return false;
+        if (string.IsNullOrWhiteSpace(req.Scope)) return false;
+
+        var approvedRoles = req.Approvals
+            .Where(a => a.Approved)
+            .Select(a => a.Role)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        return approvedRoles.Contains("Legal")
+            && approvedRoles.Contains("Compliance");
+    }
+}
