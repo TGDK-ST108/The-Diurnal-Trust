@@ -1,0 +1,16 @@
+import os
+from mistralai.client import Mistral
+from mcp import StdioServerParameters
+from mistralai.extra.mcp.stdio import MCPClientSTDIO
+
+api_key = os.environ["MISTRAL_API_KEY"]
+client = Mistral(api_key)
+
+server_params = StdioServerParameters(
+    command="python",
+    args=["./mcp_server.py"],
+    env=None,
+)
+
+# your MCP client wiring goes here
+# then attach the MCP-backed agent/conversation flow
