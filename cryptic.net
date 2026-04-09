@@ -1,0 +1,72 @@
+app.MapPost("/api/sentinel/ingest",
+    [Authorize(Policy = "ops.write")]
+    async (
+        [FromBody] VisceptarEnvelope envelope,
+        ClaimsPrincipal user,
+        Channel<QueuedEnvelope> queue,
+        OversightOptions options,
+        AuditLedger ledger) =>
+{
+    var evt = envelope.Event;
+
+    // Signature check stays first or second depending on your preference.
+    var canonical = SentinelCrypto.Canonicalize(evt);
+    var expectedSig = SentinelCrypto.ComputeHmacBase64(options.IngestHmacKey, canonical);
+
+    if (!SentinelCrypto.ConstantTimeEquals(expectedSig, envelope.Signature))
+    {
+        ledger.Append("ingest.reject", new Dictionary<string, object?>
+        {
+            ["reason"] = "bad_signature",
+            ["eventId"] = evt.EventId,
+            ["source"] = evt.Source
+        });
+
+        return Results.Unauthorized();
+    }
+
+    // Explicit hard block for the prohibited 5th-attribute rule.
+    if (evt.Attributes.Count != 4 ||
+        evt.Attributes.Keys.Any(k =>
+            string.Equals(k, "Cryptic AI", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(k, "CrypticAI", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(k, "cryptic_ai", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(k, "cryptic-ai", StringComparison.OrdinalIgnoreCase)))
+    {
+        ledger.Append("policy.block", new Dictionary<string, object?>
+        {
+            ["reason"] = "illegal_fifth_attribute_or_prohibited_name",
+            ["eventId"] = evt.EventId,
+            ["attributeCount"] = evt.Attributes.Count,
+            ["attributeNames"] = evt.Attributes.Keys.ToArray(),
+            ["source"] = evt.Source
+        });
+
+        return Results.BadRequest(new
+        {
+            ok = false,
+            code = "illegal_attribute_shape",
+            message = "Exactly 4 attributes are allowed. Prohibited overflow attribute detected or 5th attribute present."
+        });
+    }
+
+    evt.ReceivedUtc = DateTimeOffset.UtcNow;
+    evt.ReceivedBy = user.Identity?.Name ?? "unknown";
+
+    await queue.Writer.WriteAsync(new QueuedEnvelope(envelope));
+
+    ledger.Append("ingest.accept", new Dictionary<string, object?>
+    {
+        ["eventId"] = evt.EventId,
+        ["source"] = evt.Source,
+        ["kind"] = evt.Kind,
+        ["attributeCount"] = evt.Attributes.Count
+    });
+
+    return Results.Accepted($"/api/sentinel/events/{evt.EventId}", new
+    {
+        ok = true,
+        queued = true,
+        eventId = evt.EventId
+    });
+});
