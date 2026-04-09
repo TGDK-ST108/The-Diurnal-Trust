@@ -1,0 +1,27 @@
+public static class ColdurdPolicy
+{
+    public static ColdurdMode Resolve(
+        double reciprocalTrust,
+        double residualResentment,
+        double commodifiedValue,
+        bool evidenceValid,
+        bool policyValid)
+    {
+        if (!evidenceValid || !policyValid) return ColdurdMode.Escalate;
+        if (residualResentment >= 0.80) return ColdurdMode.Freeze;
+        if (reciprocalTrust < 0.35) return ColdurdMode.Escalate;
+        if (commodifiedValue < 0.20 && residualResentment > 0.50) return ColdurdMode.Throttle;
+        return ColdurdMode.Open;
+    }
+}
+
+public sealed class JdoxEvidenceEnvelope
+{
+    public string DocumentId { get; set; } = "";
+    public string PolicyId { get; set; } = "";
+    public string WorkflowId { get; set; } = "";
+    public string OwnerId { get; set; } = "";
+    public DateTimeOffset CapturedAt { get; set; }
+    public string IntegrityHash { get; set; } = "";
+    public List<string> Tags { get; set; } = new();
+}
