@@ -1,0 +1,174 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+/// @title MILCERTCOIN
+/// @notice Private/permissioned ERC-20-like token for approved participants only.
+/// @dev Self-contained contract to avoid external dependencies in this template.
+contract MILCERTCOIN {
+    string public name = "MILCERTCOIN";
+    string public symbol = "MLCT";
+    uint8 public decimals = 18;
+    uint256 public totalSupply;
+
+    address public owner;
+    bool public paused;
+
+    mapping(address => uint256) private _balances;
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    mapping(address => bool) public approvedParticipant;
+    mapping(address => bool) public minter;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed tokenOwner, address indexed spender, uint256 value);
+    event ParticipantApprovalUpdated(address indexed account, bool approved);
+    event MinterUpdated(address indexed account, bool allowed);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event Paused(address indexed by);
+    event Unpaused(address indexed by);
+    event Mint(address indexed to, uint256 amount);
+    event Burn(address indexed from, uint256 amount);
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "OWNER_ONLY");
+        _;
+    }
+
+    modifier onlyMinter() {
+        require(minter[msg.sender], "MINTER_ONLY");
+        _;
+    }
+
+    modifier whenNotPaused() {
+        require(!paused, "PAUSED");
+        _;
+    }
+
+    constructor(address admin, address treasury, uint256 initialSupply) {
+        require(admin != address(0), "BAD_ADMIN");
+        require(treasury != address(0), "BAD_TREASURY");
+
+        owner = admin;
+        approvedParticipant[admin] = true;
+        approvedParticipant[treasury] = true;
+        minter[admin] = true;
+
+        _mint(treasury, initialSupply);
+    }
+
+    function balanceOf(address account) external view returns (uint256) {
+        return _balances[account];
+    }
+
+    function allowance(address tokenOwner, address spender) external view returns (uint256) {
+        return _allowances[tokenOwner][spender];
+    }
+
+    function approveParticipant(address account, bool approved) external onlyOwner {
+        require(account != address(0), "ZERO_ADDR");
+        approvedParticipant[account] = approved;
+        emit ParticipantApprovalUpdated(account, approved);
+    }
+
+    function setMinter(address account, bool allowed) external onlyOwner {
+        require(account != address(0), "ZERO_ADDR");
+        minter[account] = allowed;
+        emit MinterUpdated(account, allowed);
+    }
+
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "ZERO_ADDR");
+        address prev = owner;
+        owner = newOwner;
+        approvedParticipant[newOwner] = true;
+        emit OwnershipTransferred(prev, newOwner);
+    }
+
+    function pause() external onlyOwner {
+        paused = true;
+        emit Paused(msg.sender);
+    }
+
+    function unpause() external onlyOwner {
+        paused = false;
+        emit Unpaused(msg.sender);
+    }
+
+    function approve(address spender, uint256 amount) external whenNotPaused returns (bool) {
+        require(approvedParticipant[msg.sender], "SENDER_NOT_APPROVED");
+        require(approvedParticipant[spender], "SPENDER_NOT_APPROVED");
+
+        _allowances[msg.sender][spender] = amount;
+        emit Approval(msg.sender, spender, amount);
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external whenNotPaused returns (bool) {
+        _requireApprovedPath(msg.sender, to);
+        _transfer(msg.sender, to, amount);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external whenNotPaused returns (bool) {
+        _requireApprovedPath(from, to);
+
+        uint256 currentAllowance = _allowances[from][msg.sender];
+        require(currentAllowance >= amount, "ALLOWANCE_TOO_LOW");
+
+        unchecked {
+            _allowances[from][msg.sender] = currentAllowance - amount;
+        }
+
+        emit Approval(from, msg.sender, _allowances[from][msg.sender]);
+        _transfer(from, to, amount);
+        return true;
+    }
+
+    function mint(address to, uint256 amount) external onlyMinter whenNotPaused returns (bool) {
+        require(approvedParticipant[to], "RECIPIENT_NOT_APPROVED");
+        _mint(to, amount);
+        emit Mint(to, amount);
+        return true;
+    }
+
+    function burn(uint256 amount) external whenNotPaused returns (bool) {
+        require(approvedParticipant[msg.sender], "SENDER_NOT_APPROVED");
+        require(_balances[msg.sender] >= amount, "BALANCE_TOO_LOW");
+
+        unchecked {
+            _balances[msg.sender] -= amount;
+            totalSupply -= amount;
+        }
+
+        emit Transfer(msg.sender, address(0), amount);
+        emit Burn(msg.sender, amount);
+        return true;
+    }
+
+    function _requireApprovedPath(address from, address to) internal view {
+        require(approvedParticipant[from], "FROM_NOT_APPROVED");
+        require(approvedParticipant[to], "TO_NOT_APPROVED");
+    }
+
+    function _transfer(address from, address to, uint256 amount) internal {
+        require(to != address(0), "ZERO_ADDR");
+        uint256 fromBalance = _balances[from];
+        require(fromBalance >= amount, "BALANCE_TOO_LOW");
+
+        unchecked {
+            _balances[from] = fromBalance - amount;
+            _balances[to] += amount;
+        }
+
+        emit Transfer(from, to, amount);
+    }
+
+    function _mint(address to, uint256 amount) internal {
+        require(to != address(0), "ZERO_ADDR");
+
+        totalSupply += amount;
+        _balances[to] += amount;
+
+        emit Transfer(address(0), to, amount);
+    }
+}
