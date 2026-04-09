@@ -1,0 +1,645 @@
+// WilmaProtocol.cs
+// Target: .NET Framework 4.8
+//
+// Safe purpose:
+// - govern agentic AI units handling sensitive records
+// - exclude uninvolved civilians by default
+// - de-identify subjects
+// - require human review before retention
+// - emit signed directives for agent units
+//
+// References to wire in:
+// - ASP.NET Web API 2
+// - Newtonsoft.Json
+//
+// AppSettings expected:
+//   <add key="WILMA_HMAC_KEY" value="change-me-hmac" />
+//   <add key="WILMA_AES_KEY" value="change-me-aes" />
+
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Configuration;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using Newtonsoft.Json;
+
+namespace Wilma.Protocol
+{
+    public enum RecordDisposition
+    {
+        Excluded = 0,
+        PendingReview = 1,
+        Retained = 2,
+        Purged = 3
+    }
+
+    public enum DirectiveAction
+    {
+        ExcludeRecord = 0,
+        MaskIdentifiers = 1,
+        QueueHumanReview = 2,
+        RetainRecord = 3,
+        PurgeRecord = 4
+    }
+
+    public sealed class WilmaIntakeRequest
+    {
+        public string CaseId { get; set; }
+        public string Actor { get; set; }
+        public string AgentUnitId { get; set; }
+        public string Relation { get; set; }
+        public double EvidenceScore { get; set; }
+        public SubjectPayload Subject { get; set; }
+        public Dictionary<string, string> Tags { get; set; }
+    }
+
+    public sealed class SubjectPayload
+    {
+        public string FullName { get; set; }
+        public string DateOfBirth { get; set; }
+        public string Email { get; set; }
+        public string Phone { get; set; }
+        public string Notes { get; set; }
+    }
+
+    public sealed class ReviewRequest
+    {
+        public string Actor { get; set; }
+        public string Reason { get; set; }
+    }
+
+    public sealed class WilmaDirectiveEnvelope
+    {
+        public string EnvelopeId { get; set; }
+        public DateTime CreatedUtc { get; set; }
+        public string Protocol { get; set; }
+        public string CaseId { get; set; }
+        public string RecordId { get; set; }
+        public string AgentUnitId { get; set; }
+        public DirectiveAction Action { get; set; }
+        public string Rationale { get; set; }
+        public Dictionary<string, object> Constraints { get; set; }
+        public string SignatureHex { get; set; }
+    }
+
+    public sealed class WilmaRecord
+    {
+        public string RecordId { get; set; }
+        public string CaseId { get; set; }
+        public string AgentUnitId { get; set; }
+        public string TokenId { get; set; }
+        public string FullNameMasked { get; set; }
+        public string Relation { get; set; }
+        public double EvidenceScore { get; set; }
+        public double RelevanceScore { get; set; }
+        public RecordDisposition Disposition { get; set; }
+        public DateTime CreatedUtc { get; set; }
+        public DateTime PurgeAtUtc { get; set; }
+        public DateTime? ReviewedUtc { get; set; }
+        public string Reviewer { get; set; }
+        public string Justification { get; set; }
+        public string EncryptedSubjectJson { get; set; }
+        public Dictionary<string, string> Tags { get; set; }
+    }
+
+    public sealed class AuditEvent
+    {
+        public string EventId { get; set; }
+        public string CaseId { get; set; }
+        public string RecordId { get; set; }
+        public string AgentUnitId { get; set; }
+        public string Action { get; set; }
+        public string Actor { get; set; }
+        public DateTime TimestampUtc { get; set; }
+        public string Notes { get; set; }
+    }
+
+    public sealed class CaseFile
+    {
+        public string CaseId { get; set; }
+        public DateTime CreatedUtc { get; set; }
+        public ConcurrentDictionary<string, WilmaRecord> Records { get; private set; }
+        public List<AuditEvent> Audit { get; private set; }
+
+        public CaseFile()
+        {
+            Records = new ConcurrentDictionary<string, WilmaRecord>(StringComparer.OrdinalIgnoreCase);
+            Audit = new List<AuditEvent>();
+        }
+    }
+
+    public sealed class WilmaEngine
+    {
+        private readonly ConcurrentDictionary<string, CaseFile> _cases =
+            new ConcurrentDictionary<string, CaseFile>(StringComparer.OrdinalIgnoreCase);
+
+        private readonly WilmaCrypto _crypto = new WilmaCrypto();
+
+        public object Intake(WilmaIntakeRequest req)
+        {
+            ValidateIntake(req);
+
+            var now = DateTime.UtcNow;
+            var caseFile = _cases.GetOrAdd(req.CaseId, id => new CaseFile
+            {
+                CaseId = id,
+                CreatedUtc = now
+            });
+
+            var relevance = ComputeRelevance(req.Relation, req.EvidenceScore, req.Tags);
+            var disposition = ComputeDisposition(req.Relation, req.EvidenceScore, relevance);
+
+            var tokenId = _crypto.Tokenize(
+                req.Subject != null ? req.Subject.FullName : null,
+                req.Subject != null ? req.Subject.DateOfBirth : null,
+                req.Subject != null ? req.Subject.Email : null,
+                req.Subject != null ? req.Subject.Phone : null
+            );
+
+            var record = new WilmaRecord
+            {
+                RecordId = "rec_" + Guid.NewGuid().ToString("N"),
+                CaseId = req.CaseId,
+                AgentUnitId = Safe(req.AgentUnitId, "agent.unknown"),
+                TokenId = tokenId,
+                FullNameMasked = MaskName(req.Subject != null ? req.Subject.FullName : null),
+                Relation = Safe(req.Relation, "unknown"),
+                EvidenceScore = Clamp(req.EvidenceScore),
+                RelevanceScore = relevance,
+                Disposition = disposition,
+                CreatedUtc = now,
+                PurgeAtUtc = disposition == RecordDisposition.Excluded ? now.AddDays(30) : now.AddDays(180),
+                ReviewedUtc = null,
+                Reviewer = null,
+                Justification = BuildJustification(disposition, relevance, req.EvidenceScore, req.Relation),
+                EncryptedSubjectJson = disposition == RecordDisposition.Excluded ? null : _crypto.EncryptObject(req.Subject),
+                Tags = req.Tags ?? new Dictionary<string, string>()
+            };
+
+            caseFile.Records[record.RecordId] = record;
+
+            AppendAudit(caseFile, new AuditEvent
+            {
+                EventId = "aud_" + Guid.NewGuid().ToString("N"),
+                CaseId = record.CaseId,
+                RecordId = record.RecordId,
+                AgentUnitId = record.AgentUnitId,
+                Action = "intake",
+                Actor = Safe(req.Actor, "system"),
+                TimestampUtc = now,
+                Notes = record.Justification
+            });
+
+            var directive = BuildDirective(record, disposition, "initial-policy-evaluation");
+
+            return new
+            {
+                ok = true,
+                caseId = record.CaseId,
+                recordId = record.RecordId,
+                tokenId = record.TokenId,
+                maskedName = record.FullNameMasked,
+                disposition = record.Disposition.ToString(),
+                relevanceScore = record.RelevanceScore,
+                purgeAtUtc = record.PurgeAtUtc,
+                directive = directive
+            };
+        }
+
+        public object Retain(string caseId, string recordId, ReviewRequest req)
+        {
+            var record = RequireRecord(caseId, recordId);
+            record.Disposition = RecordDisposition.Retained;
+            record.Reviewer = Safe(req != null ? req.Actor : null, "reviewer.unknown");
+            record.ReviewedUtc = DateTime.UtcNow;
+            record.PurgeAtUtc = DateTime.UtcNow.AddDays(365);
+            record.Justification = "Retained after review: " + Safe(req != null ? req.Reason : null, "no reason provided");
+
+            var caseFile = _cases[caseId];
+            AppendAudit(caseFile, new AuditEvent
+            {
+                EventId = "aud_" + Guid.NewGuid().ToString("N"),
+                CaseId = caseId,
+                RecordId = recordId,
+                AgentUnitId = record.AgentUnitId,
+                Action = "retain",
+                Actor = record.Reviewer,
+                TimestampUtc = DateTime.UtcNow,
+                Notes = record.Justification
+            });
+
+            return new
+            {
+                ok = true,
+                caseId = caseId,
+                recordId = recordId,
+                disposition = record.Disposition.ToString(),
+                directive = BuildDirective(record, RecordDisposition.Retained, "human-review-approved")
+            };
+        }
+
+        public object Purge(string caseId, string recordId, ReviewRequest req)
+        {
+            var record = RequireRecord(caseId, recordId);
+            record.Disposition = RecordDisposition.Purged;
+            record.Reviewer = Safe(req != null ? req.Actor : null, "reviewer.unknown");
+            record.ReviewedUtc = DateTime.UtcNow;
+            record.EncryptedSubjectJson = null;
+            record.Tags = new Dictionary<string, string>();
+            record.Justification = "Purged: " + Safe(req != null ? req.Reason : null, "no reason provided");
+
+            var caseFile = _cases[caseId];
+            AppendAudit(caseFile, new AuditEvent
+            {
+                EventId = "aud_" + Guid.NewGuid().ToString("N"),
+                CaseId = caseId,
+                RecordId = recordId,
+                AgentUnitId = record.AgentUnitId,
+                Action = "purge",
+                Actor = record.Reviewer,
+                TimestampUtc = DateTime.UtcNow,
+                Notes = record.Justification
+            });
+
+            return new
+            {
+                ok = true,
+                caseId = caseId,
+                recordId = recordId,
+                disposition = record.Disposition.ToString(),
+                directive = BuildDirective(record, RecordDisposition.Purged, "human-review-purge")
+            };
+        }
+
+        public object PurgeExpired()
+        {
+            var now = DateTime.UtcNow;
+            var touched = new List<object>();
+
+            foreach (var pair in _cases)
+            {
+                var caseFile = pair.Value;
+                foreach (var recPair in caseFile.Records)
+                {
+                    var record = recPair.Value;
+                    if (record.Disposition != RecordDisposition.Purged && record.PurgeAtUtc <= now)
+                    {
+                        record.Disposition = RecordDisposition.Purged;
+                        record.EncryptedSubjectJson = null;
+                        record.Tags = new Dictionary<string, string>();
+                        record.ReviewedUtc = now;
+                        record.Reviewer = "system";
+                        record.Justification = "Auto-purged by retention policy.";
+
+                        AppendAudit(caseFile, new AuditEvent
+                        {
+                            EventId = "aud_" + Guid.NewGuid().ToString("N"),
+                            CaseId = record.CaseId,
+                            RecordId = record.RecordId,
+                            AgentUnitId = record.AgentUnitId,
+                            Action = "auto_purge",
+                            Actor = "system",
+                            TimestampUtc = now,
+                            Notes = "Retention window expired."
+                        });
+
+                        touched.Add(new
+                        {
+                            caseId = record.CaseId,
+                            recordId = record.RecordId,
+                            agentUnitId = record.AgentUnitId,
+                            disposition = record.Disposition.ToString()
+                        });
+                    }
+                }
+            }
+
+            return new
+            {
+                ok = true,
+                purgedCount = touched.Count,
+                records = touched
+            };
+        }
+
+        public object GetCase(string caseId)
+        {
+            CaseFile caseFile;
+            if (!_cases.TryGetValue(caseId, out caseFile))
+            {
+                return new { ok = false, error = "case_not_found" };
+            }
+
+            var records = caseFile.Records.Values
+                .OrderByDescending(x => x.CreatedUtc)
+                .Select(x => new
+                {
+                    x.RecordId,
+                    x.AgentUnitId,
+                    x.TokenId,
+                    x.FullNameMasked,
+                    x.Relation,
+                    x.EvidenceScore,
+                    x.RelevanceScore,
+                    disposition = x.Disposition.ToString(),
+                    x.CreatedUtc,
+                    x.PurgeAtUtc,
+                    x.ReviewedUtc,
+                    x.Reviewer,
+                    x.Justification,
+                    x.Tags
+                })
+                .ToList();
+
+            return new
+            {
+                ok = true,
+                caseId = caseId,
+                createdUtc = caseFile.CreatedUtc,
+                counts = new
+                {
+                    total = records.Count,
+                    excluded = records.Count(x => x.disposition == "Excluded"),
+                    pending = records.Count(x => x.disposition == "PendingReview"),
+                    retained = records.Count(x => x.disposition == "Retained"),
+                    purged = records.Count(x => x.disposition == "Purged")
+                },
+                records = records
+            };
+        }
+
+        public object GetAudit(string caseId)
+        {
+            CaseFile caseFile;
+            if (!_cases.TryGetValue(caseId, out caseFile))
+            {
+                return new { ok = false, error = "case_not_found" };
+            }
+
+            lock (caseFile.Audit)
+            {
+                return new
+                {
+                    ok = true,
+                    caseId = caseId,
+                    events = caseFile.Audit
+                        .OrderByDescending(x => x.TimestampUtc)
+                        .Select(x => new
+                        {
+                            x.EventId,
+                            x.RecordId,
+                            x.AgentUnitId,
+                            x.Action,
+                            x.Actor,
+                            x.TimestampUtc,
+                            x.Notes
+                        })
+                        .ToList()
+                };
+            }
+        }
+
+        private WilmaDirectiveEnvelope BuildDirective(WilmaRecord record, RecordDisposition disposition, string rationale)
+        {
+            DirectiveAction action;
+            var constraints = new Dictionary<string, object>();
+
+            switch (disposition)
+            {
+                case RecordDisposition.Excluded:
+                    action = DirectiveAction.ExcludeRecord;
+                    constraints["deidentify"] = true;
+                    constraints["exportAllowed"] = false;
+                    constraints["contactAllowed"] = false;
+                    constraints["autoPurgeOn"] = record.PurgeAtUtc.ToString("o");
+                    break;
+
+                case RecordDisposition.PendingReview:
+                    action = DirectiveAction.QueueHumanReview;
+                    constraints["deidentify"] = true;
+                    constraints["exportAllowed"] = false;
+                    constraints["humanApprovalRequired"] = true;
+                    constraints["contactAllowed"] = false;
+                    break;
+
+                case RecordDisposition.Retained:
+                    action = DirectiveAction.RetainRecord;
+                    constraints["deidentify"] = true;
+                    constraints["exportAllowed"] = false;
+                    constraints["contactAllowed"] = false;
+                    constraints["reviewed"] = true;
+                    break;
+
+                case RecordDisposition.Purged:
+                default:
+                    action = DirectiveAction.PurgeRecord;
+                    constraints["deidentify"] = true;
+                    constraints["exportAllowed"] = false;
+                    constraints["deleteSensitivePayload"] = true;
+                    break;
+            }
+
+            var envelope = new WilmaDirectiveEnvelope
+            {
+                EnvelopeId = "env_" + Guid.NewGuid().ToString("N"),
+                CreatedUtc = DateTime.UtcNow,
+                Protocol = "!WILMA/1.0",
+                CaseId = record.CaseId,
+                RecordId = record.RecordId,
+                AgentUnitId = record.AgentUnitId,
+                Action = action,
+                Rationale = rationale,
+                Constraints = constraints
+            };
+
+            envelope.SignatureHex = _crypto.SignObject(new
+            {
+                envelope.EnvelopeId,
+                envelope.CreatedUtc,
+                envelope.Protocol,
+                envelope.CaseId,
+                envelope.RecordId,
+                envelope.AgentUnitId,
+                Action = envelope.Action.ToString(),
+                envelope.Rationale,
+                envelope.Constraints
+            });
+
+            return envelope;
+        }
+
+        private static string BuildJustification(RecordDisposition disposition, double relevance, double evidence, string relation)
+        {
+            if (disposition == RecordDisposition.Excluded)
+            {
+                return string.Format(
+                    "Excluded by !WILMA default policy. relation={0}, evidence={1:F2}, relevance={2:F2}",
+                    Safe(relation, "unknown"), evidence, relevance);
+            }
+
+            return string.Format(
+                "Pending human review. relation={0}, evidence={1:F2}, relevance={2:F2}",
+                Safe(relation, "unknown"), evidence, relevance);
+        }
+
+        private static double ComputeRelevance(string relation, double evidence, Dictionary<string, string> tags)
+        {
+            double relationWeight;
+            switch (Safe(relation, "unknown").ToLowerInvariant())
+            {
+                case "primary_subject": relationWeight = 1.00; break;
+                case "victim": relationWeight = 0.95; break;
+                case "direct_witness": relationWeight = 0.85; break;
+                case "investigator": relationWeight = 0.70; break;
+                case "associate": relationWeight = 0.45; break;
+                case "bystander": relationWeight = 0.10; break;
+                case "collateral": relationWeight = 0.00; break;
+                default: relationWeight = 0.05; break;
+            }
+
+            var evidenceWeight = Clamp(evidence);
+            var tagWeight = (tags != null && tags.Count > 0) ? 0.05 : 0.0;
+
+            return Math.Round(Clamp((relationWeight * 0.65) + (evidenceWeight * 0.30) + tagWeight), 4);
+        }
+
+        private static RecordDisposition ComputeDisposition(string relation, double evidence, double relevance)
+        {
+            var rel = Safe(relation, "unknown").ToLowerInvariant();
+            var lowRelation = rel == "bystander" || rel == "collateral" || rel == "unknown";
+
+            if (lowRelation || evidence < 0.50 || relevance < 0.55)
+                return RecordDisposition.Excluded;
+
+            return RecordDisposition.PendingReview;
+        }
+
+        private static string MaskName(string fullName)
+        {
+            if (string.IsNullOrWhiteSpace(fullName))
+                return "REDACTED";
+
+            var parts = fullName.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 1)
+                return parts[0].Substring(0, 1) + "***";
+
+            return string.Join(" ", parts.Select((p, i) =>
+                i == parts.Length - 1 ? p.Substring(0, 1) + "***" : p));
+        }
+
+        private static double Clamp(double value)
+        {
+            if (value < 0.0) return 0.0;
+            if (value > 1.0) return 1.0;
+            return value;
+        }
+
+        private static string Safe(string value, string fallback)
+        {
+            return string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+        }
+
+        private void AppendAudit(CaseFile caseFile, AuditEvent evt)
+        {
+            lock (caseFile.Audit)
+            {
+                caseFile.Audit.Add(evt);
+            }
+        }
+
+        private WilmaRecord RequireRecord(string caseId, string recordId)
+        {
+            CaseFile caseFile;
+            if (!_cases.TryGetValue(caseId, out caseFile))
+                throw new InvalidOperationException("case_not_found");
+
+            WilmaRecord record;
+            if (!caseFile.Records.TryGetValue(recordId, out record))
+                throw new InvalidOperationException("record_not_found");
+
+            return record;
+        }
+
+        private static void ValidateIntake(WilmaIntakeRequest req)
+        {
+            if (req == null) throw new ArgumentNullException("req");
+            if (string.IsNullOrWhiteSpace(req.CaseId)) throw new ArgumentException("CaseId is required.");
+            if (req.Subject == null) throw new ArgumentException("Subject is required.");
+        }
+    }
+
+    public sealed class WilmaCrypto
+    {
+        private readonly byte[] _hmacKey;
+        private readonly byte[] _aesKey;
+
+        public WilmaCrypto()
+        {
+            _hmacKey = SHA256.Create().ComputeHash(
+                Encoding.UTF8.GetBytes(ReadAppSetting("WILMA_HMAC_KEY", "dev-hmac-key-change-me")));
+
+            _aesKey = SHA256.Create().ComputeHash(
+                Encoding.UTF8.GetBytes(ReadAppSetting("WILMA_AES_KEY", "dev-aes-key-change-me")));
+        }
+
+        public string Tokenize(params string[] values)
+        {
+            var joined = string.Join("|", values.Select(v => (v ?? "").Trim().ToLowerInvariant()));
+            using (var hmac = new HMACSHA256(_hmacKey))
+            {
+                var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(joined));
+                return BitConverter.ToString(hash).Replace("-", "").Substring(0, 24);
+            }
+        }
+
+        public string SignObject(object value)
+        {
+            var json = JsonConvert.SerializeObject(value);
+            using (var hmac = new HMACSHA256(_hmacKey))
+            {
+                var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(json));
+                return BitConverter.ToString(hash).Replace("-", "");
+            }
+        }
+
+        public string EncryptObject(object value)
+        {
+            var plaintext = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(value));
+            using (var aes = Aes.Create())
+            {
+                aes.Key = _aesKey;
+                aes.Mode = CipherMode.CBC;
+                aes.Padding = PaddingMode.PKCS7;
+                aes.GenerateIV();
+
+                byte[] cipher;
+                using (var encryptor = aes.CreateEncryptor(aes.Key, aes.IV))
+                {
+                    cipher = encryptor.TransformFinalBlock(plaintext, 0, plaintext.Length);
+                }
+
+                byte[] combined = new byte[aes.IV.Length + cipher.Length];
+                Buffer.BlockCopy(aes.IV, 0, combined, 0, aes.IV.Length);
+                Buffer.BlockCopy(cipher, 0, combined, aes.IV.Length, cipher.Length);
+
+                string payload = Convert.ToBase64String(combined);
+                string mac = SignObject(payload);
+
+                return JsonConvert.SerializeObject(new
+                {
+                    alg = "AES-CBC+HMACSHA256",
+                    payload = payload,
+                    mac = mac
+                });
+            }
+        }
+
+        private static string ReadAppSetting(string key, string fallback)
+        {
+            var value = ConfigurationManager.AppSettings[key];
+            return string.IsNullOrWhiteSpace(value) ? fallback : value;
+        }
+    }
+}
