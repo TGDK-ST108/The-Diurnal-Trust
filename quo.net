@@ -1,0 +1,24 @@
+# Initialize a martial set
+martial_set = QUOMartialSet(
+    strengths={"offense": 5, "speed": 3, "precision": 4},
+    weaknesses={"endurance": 2, "predictability": 4}
+)
+
+# Add witness hooks
+martial_set.add_witness_hook(
+    WitnessHook(
+        trigger_condition=lambda state: state["strengths"]["offense"] > 4,
+        action=lambda state: state.log_witness_xp(10)
+    )
+)
+
+martial_set.add_witness_hook(
+    WitnessHook(
+        trigger_condition=lambda state: state["weaknesses"]["endurance"] < 3,
+        action=lambda state: state.adjust_attribute("endurance", 1)
+    )
+)
+
+# Simulate actions
+martial_set.perform_action("strike")  # Triggers offense hook
+martial_set.perform_action("dodge")   # May trigger speed/endurance hooks
