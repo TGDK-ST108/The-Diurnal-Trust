@@ -1,0 +1,108 @@
+from dataclasses import dataclass
+from typing import List, Optional
+import numpy as np
+
+@dataclass
+class ResidualIncomeInput:
+    period: str
+    revenue: float
+    net_income: float
+    beginning_equity: float
+    cost_of_equity_rate: float  # e.g., 0.105 for 10.5%
+    dividends: float
+    ending_equity_actual: float
+    prior_residual_income: Optional[float] = None
+
+@dataclass
+class FiveColRow:
+    period: str
+    revenue: float
+    net_income: float
+    beginning_equity: float
+    equity_charge: float
+    residual_income: float
+    dex1_net_margin: float
+    dex2_equity_charge_rate: float
+    dex3_residual_margin: float
+    dex4_residual_yield: float
+    dex5_charge_coverage: float
+    dex6_clean_surplus_drift: float
+    matrix_score: float
+
+def build_row(input: ResidualIncomeInput) -> FiveColRow:
+    equity_charge = input.beginning_equity * input.cost_of_equity_rate
+    residual_income = input.net_income - equity_charge
+    ending_equity_expected = input.beginning_equity + input.net_income - input.dividends
+
+    def safe_div(numerator, denominator):
+        return numerator / denominator if denominator != 0 else 0.0
+
+    dex1 = safe_div(input.net_income, input.revenue)
+    dex2 = safe_div(equity_charge, input.beginning_equity)
+    dex3 = safe_div(residual_income, input.revenue)
+    dex4 = safe_div(residual_income, input.beginning_equity)
+    dex5 = safe_div(input.net_income, equity_charge)
+    dex6 = safe_div(
+        ending_equity_expected - input.ending_equity_actual,
+        ending_equity_expected
+    ) if ending_equity_expected != 0 else 0.0
+
+    # Normalize and clamp
+    def normalize_coverage(coverage):
+        return max(0.0, min(1.0, coverage / 2.0))
+
+    def clamp01(value):
+        return max(0.0, min(1.0, value))
+
+    matrix_score = (
+        dex1 * 0.15 +
+        dex3 * 0.25 +
+        dex4 * 0.25 +
+        normalize_coverage(dex5) * 0.20 +
+        (1.0 - abs(dex6)) * 0.15
+    )
+
+    return FiveColRow(
+        period=input.period,
+        revenue=input.revenue,
+        net_income=input.net_income,
+        beginning_equity=input.beginning_equity,
+        equity_charge=equity_charge,
+        residual_income=residual_income,
+        dex1_net_margin=dex1,
+        dex2_equity_charge_rate=dex2,
+        dex3_residual_margin=dex3,
+        dex4_residual_yield=dex4,
+        dex5_charge_coverage=dex5,
+        dex6_clean_surplus_drift=dex6,
+        matrix_score=clamp01(matrix_score)
+    )
+
+def build_matrix(inputs: List[ResidualIncomeInput]) -> List[FiveColRow]:
+    return [build_row(input) for input in inputs]
+
+# Example usage
+inputs = [
+    ResidualIncomeInput(
+        period="2026-Q1",
+        revenue=1200000,
+        net_income=155000,
+        beginning_equity=1000000,
+        cost_of_equity_rate=0.105,
+        dividends=25000,
+        ending_equity_actual=1132000
+    ),
+    ResidualIncomeInput(
+        period="2026-Q2",
+        revenue=1325000,
+        net_income=181000,
+        beginning_equity=1132000,
+        cost_of_equity_rate=0.105,
+        dividends=30000,
+        ending_equity_actual=1280000
+    )
+]
+
+matrix = build_matrix(inputs)
+for row in matrix:
+    print(f"{row.period}: Score = {row.matrix_score:.2f}")
