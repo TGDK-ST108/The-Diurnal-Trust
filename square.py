@@ -45,34 +45,47 @@ Rules:
 """.strip()
 
     @staticmethod
-    def square_up(data: StaldwellInput) -> Dict[str, Any]:
-        """
-        Retain abstraction while organizing the problem into a balanced frame.
-        """
-        return {
-            "query_core": data.query.strip(),
-            "state_core": data.state.strip(),
-            "target_core": data.target.strip(),
-            "execution_frame": {
-                "procedure_count": len(data.procedure),
-                "asset_count": len(data.assets),
-                "constraint_count": len(data.constraints),
-                "risk_count": len(data.risks),
-                "signal_count": len(data.signals),
-                "team_rank_count": len(data.team_ranks),
-                "window": data.window,
-                "policy": data.policy,
-            },
-            "square": {
-                "intent": data.target.strip(),
-                "position": data.state.strip(),
-                "movement": data.procedure[:],
-                "pressure": data.constraints[:] + data.risks[:],
-            },
-            "assets": data.assets[:],
-            "signals": data.signals[:],
-            "team_ranks": data.team_ranks[:],
-        }
+def square_up(data: StaldwellInput) -> Dict[str, Any]:
+    return {
+        "query_core": data.query.strip(),
+        "state_core": data.state.strip(),
+        "target_core": data.target.strip(),
+        "square": {
+            "intent": data.target.strip(),
+            "position": data.state.strip(),
+            "movement": data.procedure[:],
+            "pressure": data.constraints[:] + data.risks[:],
+            "direct_repair": [
+                "remove drift",
+                "repair ownership",
+                "restore measurable flow"
+            ],
+            "covertices": {
+                "left_stabilizer": [
+                    "knowledge extraction",
+                    "dependency reduction"
+                ],
+                "right_stabilizer": [
+                    "weekly measurement",
+                    "fallback enforcement"
+                ]
+            }
+        },
+        "assets": data.assets[:],
+        "signals": data.signals[:],
+        "team_ranks": data.team_ranks[:],
+    }
+
+    @dataclass
+class RepairSquare:
+    intent: str
+    position: str
+    movement: List[str]
+    pressure: List[str]
+    direct_repair: List[str] = field(default_factory=list)
+    covertices: Dict[str, List[str]] = field(default_factory=dict)
+
+    
 
     @classmethod
     def build_context_line(cls, data: StaldwellInput) -> str:
