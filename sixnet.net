@@ -1,0 +1,266 @@
+using System.Reflection;
+using System.Text.Json;
+
+// ==============================
+// MODELS
+// ==============================
+
+public enum VectorId
+{
+    V1 = 1,
+    V2 = 2,
+    V3 = 3,
+    V4 = 4,
+    V5 = 5,
+    V6 = 6
+}
+
+public sealed class VectorRequest
+{
+    public string CorrelationId { get; set; } = Guid.NewGuid().ToString("N");
+    public string Payload { get; set; } = "";
+    public Dictionary<string, string> Meta { get; set; } = new();
+}
+
+public sealed class VectorResponse
+{
+    public bool Ok { get; set; }
+    public string Vector { get; set; } = "";
+    public string Message { get; set; } = "";
+    public object? Data { get; set; }
+    public long ElapsedMs { get; set; }
+}
+
+// ==============================
+// CONTRACT
+// ==============================
+
+public interface ISixVectorProxy
+{
+    Task<VectorResponse> V1Async(VectorRequest request, CancellationToken ct = default);
+    Task<VectorResponse> V2Async(VectorRequest request, CancellationToken ct = default);
+    Task<VectorResponse> V3Async(VectorRequest request, CancellationToken ct = default);
+    Task<VectorResponse> V4Async(VectorRequest request, CancellationToken ct = default);
+    Task<VectorResponse> V5Async(VectorRequest request, CancellationToken ct = default);
+    Task<VectorResponse> V6Async(VectorRequest request, CancellationToken ct = default);
+}
+
+// ==============================
+// REAL TARGET IMPLEMENTATION
+// ==============================
+
+public sealed class SixVectorService : ISixVectorProxy
+{
+    public Task<VectorResponse> V1Async(VectorRequest request, CancellationToken ct = default)
+        => HandleAsync(VectorId.V1, request, ct);
+
+    public Task<VectorResponse> V2Async(VectorRequest request, CancellationToken ct = default)
+        => HandleAsync(VectorId.V2, request, ct);
+
+    public Task<VectorResponse> V3Async(VectorRequest request, CancellationToken ct = default)
+        => HandleAsync(VectorId.V3, request, ct);
+
+    public Task<VectorResponse> V4Async(VectorRequest request, CancellationToken ct = default)
+        => HandleAsync(VectorId.V4, request, ct);
+
+    public Task<VectorResponse> V5Async(VectorRequest request, CancellationToken ct = default)
+        => HandleAsync(VectorId.V5, request, ct);
+
+    public Task<VectorResponse> V6Async(VectorRequest request, CancellationToken ct = default)
+        => HandleAsync(VectorId.V6, request, ct);
+
+    private static Task<VectorResponse> HandleAsync(VectorId vector, VectorRequest request, CancellationToken ct)
+    {
+        var data = new
+        {
+            request.CorrelationId,
+            request.Payload,
+            request.Meta,
+            RoutedTo = vector.ToString(),
+            Utc = DateTimeOffset.UtcNow
+        };
+
+        return Task.FromResult(new VectorResponse
+        {
+            Ok = true,
+            Vector = vector.ToString(),
+            Message = $"Handled by {vector}",
+            Data = data
+        });
+    }
+}
+
+// ==============================
+// PROXY
+// ==============================
+
+public sealed class SixVectorDispatchProxy : DispatchProxy
+{
+    public ISixVectorProxy? Target { get; set; }
+    public HashSet<VectorId> EnabledVectors { get; } = Enum.GetValues<VectorId>().ToHashSet();
+
+    protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+    {
+        if (targetMethod is null)
+            throw new InvalidOperationException("Missing target method.");
+
+        if (Target is null)
+            throw new InvalidOperationException("Proxy target not configured.");
+
+        var vector = ResolveVector(targetMethod.Name);
+
+        if (!EnabledVectors.Contains(vector))
+            return Task.FromResult(new VectorResponse
+            {
+                Ok = false,
+                Vector = vector.ToString(),
+                Message = $"Vector {vector} is disabled."
+            });
+
+        var request = ExtractRequest(args);
+        ValidateRequest(request, vector);
+
+        var started = DateTimeOffset.UtcNow;
+
+        try
+        {
+            var resultObj = targetMethod.Invoke(Target, args);
+
+            if (resultObj is Task<VectorResponse> task)
+                return WrapAsync(task, vector, request.CorrelationId, started);
+
+            throw new InvalidOperationException($"Unsupported return type for {targetMethod.Name}.");
+        }
+        catch (TargetInvocationException tie) when (tie.InnerException is not null)
+        {
+            return Task.FromResult(new VectorResponse
+            {
+                Ok = false,
+                Vector = vector.ToString(),
+                Message = $"Invocation failed: {tie.InnerException.Message}"
+            });
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new VectorResponse
+            {
+                Ok = false,
+                Vector = vector.ToString(),
+                Message = $"Proxy failed: {ex.Message}"
+            });
+        }
+    }
+
+    private static async Task<VectorResponse> WrapAsync(
+        Task<VectorResponse> inner,
+        VectorId vector,
+        string correlationId,
+        DateTimeOffset started)
+    {
+        var result = await inner.ConfigureAwait(false);
+        result.Vector = vector.ToString();
+        result.ElapsedMs = (long)(DateTimeOffset.UtcNow - started).TotalMilliseconds;
+
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            kind = "vector.proxy",
+            vector = vector.ToString(),
+            correlationId,
+            ok = result.Ok,
+            elapsedMs = result.ElapsedMs,
+            utc = DateTimeOffset.UtcNow
+        }));
+
+        return result;
+    }
+
+    private static VectorId ResolveVector(string methodName) => methodName switch
+    {
+        nameof(ISixVectorProxy.V1Async) => VectorId.V1,
+        nameof(ISixVectorProxy.V2Async) => VectorId.V2,
+        nameof(ISixVectorProxy.V3Async) => VectorId.V3,
+        nameof(ISixVectorProxy.V4Async) => VectorId.V4,
+        nameof(ISixVectorProxy.V5Async) => VectorId.V5,
+        nameof(ISixVectorProxy.V6Async) => VectorId.V6,
+        _ => throw new InvalidOperationException($"Unknown vector method: {methodName}")
+    };
+
+    private static VectorRequest ExtractRequest(object?[]? args)
+    {
+        if (args is null || args.Length == 0 || args[0] is not VectorRequest req)
+            throw new ArgumentException("First argument must be VectorRequest.");
+
+        return req;
+    }
+
+    private static void ValidateRequest(VectorRequest request, VectorId vector)
+    {
+        if (string.IsNullOrWhiteSpace(request.CorrelationId))
+            throw new ArgumentException("CorrelationId is required.");
+
+        if (request.Payload.Length > 100_000)
+            throw new ArgumentException($"Payload too large for {vector}.");
+
+        if (request.Meta.Count > 32)
+            throw new ArgumentException("Too many metadata entries.");
+    }
+}
+
+// ==============================
+// FACTORY
+// ==============================
+
+public static class SixVectorProxyFactory
+{
+    public static ISixVectorProxy Create(
+        ISixVectorProxy target,
+        IEnumerable<VectorId>? enabledVectors = null)
+    {
+        var proxy = DispatchProxy.Create<ISixVectorProxy, SixVectorDispatchProxy>();
+
+        var concrete = (SixVectorDispatchProxy)(object)proxy!;
+        concrete.Target = target;
+
+        concrete.EnabledVectors.Clear();
+        foreach (var vector in enabledVectors ?? Enum.GetValues<VectorId>())
+            concrete.EnabledVectors.Add(vector);
+
+        return proxy!;
+    }
+}
+
+// ==============================
+// DEMO
+// ==============================
+
+public static class Program
+{
+    public static async Task Main()
+    {
+        ISixVectorProxy real = new SixVectorService();
+
+        // Example: enable only 1, 2, 3, 4, 6
+        ISixVectorProxy proxied = SixVectorProxyFactory.Create(
+            real,
+            new[] { VectorId.V1, VectorId.V2, VectorId.V3, VectorId.V4, VectorId.V6 });
+
+        var req = new VectorRequest
+        {
+            Payload = "hello six-vector proxy",
+            Meta = new Dictionary<string, string>
+            {
+                ["tenant"] = "ops",
+                ["priority"] = "normal"
+            }
+        };
+
+        var r1 = await proxied.V1Async(req);
+        Console.WriteLine(JsonSerializer.Serialize(r1));
+
+        var r5 = await proxied.V5Async(req);
+        Console.WriteLine(JsonSerializer.Serialize(r5));
+
+        var r6 = await proxied.V6Async(req);
+        Console.WriteLine(JsonSerializer.Serialize(r6));
+    }
+}
