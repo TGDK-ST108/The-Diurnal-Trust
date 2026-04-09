@@ -26,5 +26,25 @@ class SentinelII_Invertlock:
         else:
             print("[Invertlock] All clear.")
 
+    var oversightEvent = new
+{
+    kind = "overwrite.fraud",
+    severity = 9,
+    summary = "Fraudulent overwrite attempt blocked",
+    tags = new Dictionary<string, string>
+    {
+        ["integrity"] = "tamper",
+        ["governance"] = "policy-breach",
+        ["channel"] = "jdox_duo"
+    },
+    attributes = new Dictionary<string, object?>
+    {
+        ["requestId"] = req.RequestId,
+        ["operatorId"] = req.OperatorId,
+        ["entityId"] = req.Target.EntityId,
+        ["disposition"] = req.Disposition.ToString()
+    }
+};
+
 # Example usage
 # SentinelII_Invertlock(scooty_unit).run()
