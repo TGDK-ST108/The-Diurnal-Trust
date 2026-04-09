@@ -1,0 +1,78 @@
+// ConcordiaController.cs
+// ASP.NET Web API 2 controller example
+
+using System;
+using System.Web.Http;
+using ProgenticAI.USA0METFORCE.Concordia;
+
+namespace ProgenticAI.Api.Controllers
+{
+    [RoutePrefix("api/concordia")]
+    public sealed class ConcordiaController : ApiController
+    {
+        private static readonly ConcordiaEngine Engine = new ConcordiaEngine();
+
+        [HttpPost]
+        [Route("intake")]
+        public IHttpActionResult Intake([FromBody] ConcordiaIntakeRequest req)
+        {
+            try
+            {
+                return Ok(Engine.Intake(req));
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(ex.Message);
+            }
+        }
+
+        [HttpPost]
+        [Route("{caseId}/review/retain/{recordId}")]
+        public IHttpActionResult Retain(string caseId, string recordId, [FromBody] ReviewRequest req)
+        {
+            try
+            {
+                return Ok(Engine.Retain(caseId, recordId, req));
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(ex.Message);
+            }
+        }
+
+        [HttpPost]
+        [Route("{caseId}/review/purge/{recordId}")]
+        public IHttpActionResult Purge(string caseId, string recordId, [FromBody] ReviewRequest req)
+        {
+            try
+            {
+                return Ok(Engine.Purge(caseId, recordId, req));
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(ex.Message);
+            }
+        }
+
+        [HttpPost]
+        [Route("maintenance/purge-expired")]
+        public IHttpActionResult PurgeExpired()
+        {
+            return Ok(Engine.PurgeExpired());
+        }
+
+        [HttpGet]
+        [Route("cases/{caseId}")]
+        public IHttpActionResult GetCase(string caseId)
+        {
+            return Ok(Engine.GetCase(caseId));
+        }
+
+        [HttpGet]
+        [Route("audit/{caseId}")]
+        public IHttpActionResult GetAudit(string caseId)
+        {
+            return Ok(Engine.GetAudit(caseId));
+        }
+    }
+}
