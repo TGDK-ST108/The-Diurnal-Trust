@@ -1,0 +1,81 @@
+using System.ComponentModel.DataAnnotations;
+using System.Text.Json.Serialization;
+
+// Program.cs additions
+builder.Services.AddValidation();
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class VisceptarEnvelope
+{
+    public string Protocol { get; set; } = "Visceptar";
+    public string Version { get; set; } = "1.0";
+    public string Signature { get; set; } = "";
+    public OversightEvent Event { get; set; } = new();
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class OversightEvent : IValidatableObject
+{
+    public string EventId { get; set; } = Guid.NewGuid().ToString("N");
+    public string Source { get; set; } = "unknown";
+    public string Kind { get; set; } = "telemetry";
+    public int Severity { get; set; } = 1;
+    public string Summary { get; set; } = "";
+
+    // Keep tags separate if you want them; they are not part of the 4-attribute rule.
+    public Dictionary<string, string> Tags { get; set; } = new();
+
+    // This is the governed 4-slot attribute set.
+    [Required]
+    public Dictionary<string, object?> Attributes { get; set; } = new();
+
+    private static readonly HashSet<string> ProhibitedNames =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            "Cryptic AI",
+            "CrypticAI",
+            "cryptic_ai",
+            "cryptic-ai"
+        };
+
+    public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
+    {
+        if (Attributes is null)
+        {
+            yield return new ValidationResult(
+                "Attributes are required.",
+                new[] { nameof(Attributes) });
+            yield break;
+        }
+
+        if (Attributes.Count != 4)
+        {
+            yield return new ValidationResult(
+                "Exactly 4 attributes are allowed. A 5th attribute is hard-blocked.",
+                new[] { nameof(Attributes) });
+        }
+
+        foreach (var key in Attributes.Keys)
+        {
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                yield return new ValidationResult(
+                    "Attribute names must be non-empty.",
+                    new[] { nameof(Attributes) });
+            }
+
+            if (ProhibitedNames.Contains(key))
+            {
+                yield return new ValidationResult(
+                    $"Prohibited attribute detected: '{key}'.",
+                    new[] { nameof(Attributes) });
+            }
+        }
+    }
+
+    [JsonIgnore]
+    public DateTimeOffset? ReceivedUtc { get; set; }
+
+    [JsonIgnore]
+    public string? ReceivedBy { get; set; }
+}
