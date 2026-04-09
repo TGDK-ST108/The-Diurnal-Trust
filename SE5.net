@@ -1,0 +1,492 @@
+// Program.cs
+// Sentinel AI NET - defensive oversight network scaffold
+// Target: ASP.NET Core on modern .NET
+// Purpose: internal event oversight, alerting, audit, policy evaluation
+
+using System.Collections.Concurrent;
+using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json.Serialization;
+using System.Threading.Channels;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.IdentityModel.Tokens;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// ---------------------------
+// Config
+// ---------------------------
+var jwtIssuer = builder.Configuration["Jwt:Issuer"] ?? "sentinel.local";
+var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "sentinel-oversight";
+var jwtKey = builder.Configuration["Jwt:Key"] ?? "CHANGE_THIS_TO_A_LONG_RANDOM_SECRET_32+";
+var ingestHmacKey = builder.Configuration["Ingress:HmacKey"] ?? "CHANGE_THIS_TOO_LONG_RANDOM_HMAC_SECRET";
+
+// ---------------------------
+// Services
+// ---------------------------
+builder.Services.AddSingleton(new OversightOptions
+{
+    IngestHmacKey = ingestHmacKey
+});
+
+builder.Services.AddSingleton<AuditLedger>();
+builder.Services.AddSingleton<AlertStore>();
+builder.Services.AddSingleton<PolicyEngine>();
+builder.Services.AddSingleton(Channel.CreateUnbounded<QueuedEnvelope>(
+    new UnboundedChannelOptions
+    {
+        SingleReader = true,
+        SingleWriter = false,
+        AllowSynchronousContinuations = false
+    }));
+builder.Services.AddHostedService<EnvelopeProcessorWorker>();
+
+builder.Services
+    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.RequireHttpsMetadata = false; // set true behind TLS in production
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = jwtIssuer,
+            ValidateAudience = true,
+            ValidAudience = jwtAudience,
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey)),
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.FromMinutes(1)
+        };
+    });
+
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("ops.read", p => p.RequireClaim("scope", "ops.read"));
+    options.AddPolicy("ops.write", p => p.RequireClaim("scope", "ops.write"));
+    options.AddPolicy("ops.admin", p => p.RequireClaim("scope", "ops.admin"));
+});
+
+var app = builder.Build();
+
+app.UseAuthentication();
+app.UseAuthorization();
+
+// ---------------------------
+// Routes
+// ---------------------------
+
+app.MapGet("/api/sentinel/health", () =>
+{
+    return Results.Ok(new
+    {
+        ok = true,
+        service = "Sentinel AI NET",
+        mode = "defensive-oversight",
+        utc = DateTimeOffset.UtcNow
+    });
+});
+
+app.MapPost("/api/sentinel/ingest",
+    [Authorize(Policy = "ops.write")]
+    async (
+        [FromBody] VisceptarEnvelope envelope,
+        ClaimsPrincipal user,
+        Channel<QueuedEnvelope> queue,
+        OversightOptions options,
+        AuditLedger ledger) =>
+{
+    if (envelope is null || envelope.Event is null)
+        return Results.BadRequest(new { ok = false, error = "Envelope missing event payload." });
+
+    // Verify transport signature over canonical event string
+    var canonical = SentinelCrypto.Canonicalize(envelope.Event);
+    var expectedSig = SentinelCrypto.ComputeHmacBase64(options.IngestHmacKey, canonical);
+
+    if (!SentinelCrypto.ConstantTimeEquals(expectedSig, envelope.Signature))
+    {
+        ledger.Append("ingest.reject", new Dictionary<string, object?>
+        {
+            ["reason"] = "bad_signature",
+            ["eventId"] = envelope.Event.EventId,
+            ["actor"] = user.Identity?.Name ?? "unknown"
+        });
+
+        return Results.Unauthorized();
+    }
+
+    envelope.Event.ReceivedUtc = DateTimeOffset.UtcNow;
+    envelope.Event.ReceivedBy = user.Identity?.Name ?? "unknown";
+
+    await queue.Writer.WriteAsync(new QueuedEnvelope(envelope));
+
+    ledger.Append("ingest.accept", new Dictionary<string, object?>
+    {
+        ["eventId"] = envelope.Event.EventId,
+        ["source"] = envelope.Event.Source,
+        ["kind"] = envelope.Event.Kind,
+        ["actor"] = envelope.Event.ReceivedBy
+    });
+
+    return Results.Accepted($"/api/sentinel/events/{envelope.Event.EventId}", new
+    {
+        ok = true,
+        queued = true,
+        eventId = envelope.Event.EventId
+    });
+});
+
+app.MapGet("/api/sentinel/alerts",
+    [Authorize(Policy = "ops.read")]
+    (AlertStore alerts) =>
+{
+    return Results.Ok(new
+    {
+        ok = true,
+        count = alerts.Items.Count,
+        items = alerts.Items
+            .OrderByDescending(x => x.CreatedUtc)
+            .Take(250)
+            .ToList()
+    });
+});
+
+app.MapGet("/api/sentinel/audit",
+    [Authorize(Policy = "ops.admin")]
+    (AuditLedger ledger) =>
+{
+    return Results.Ok(new
+    {
+        ok = true,
+        count = ledger.Entries.Count,
+        items = ledger.Entries
+            .OrderByDescending(x => x.Sequence)
+            .Take(500)
+            .ToList()
+    });
+});
+
+app.MapGet("/api/sentinel/events/{eventId}",
+    [Authorize(Policy = "ops.read")]
+    (string eventId, AuditLedger ledger, AlertStore alerts) =>
+{
+    var auditHits = ledger.Entries.Where(x => x.PayloadJson.Contains(eventId, StringComparison.OrdinalIgnoreCase)).ToList();
+    var alertHits = alerts.Items.Where(x => x.EventId == eventId).ToList();
+
+    return Results.Ok(new
+    {
+        ok = true,
+        eventId,
+        audit = auditHits,
+        alerts = alertHits
+    });
+});
+
+app.Run();
+
+// ---------------------------
+// Models
+// ---------------------------
+
+public sealed class OversightOptions
+{
+    public string IngestHmacKey { get; set; } = "";
+}
+
+public sealed class VisceptarEnvelope
+{
+    public string Protocol { get; set; } = "Covert-Visceptar";
+    public string Version { get; set; } = "1.0";
+    public string Signature { get; set; } = "";
+    public OversightEvent Event { get; set; } = new();
+}
+
+public sealed class OversightEvent
+{
+    public string EventId { get; set; } = Guid.NewGuid().ToString("N");
+    public string Source { get; set; } = "unknown";
+    public string Kind { get; set; } = "telemetry";
+    public int Severity { get; set; } = 1;
+    public string Summary { get; set; } = "";
+    public Dictionary<string, string> Tags { get; set; } = new();
+    public Dictionary<string, object?> Attributes { get; set; } = new();
+
+    [JsonIgnore]
+    public DateTimeOffset? ReceivedUtc { get; set; }
+
+    [JsonIgnore]
+    public string? ReceivedBy { get; set; }
+}
+
+public sealed record QueuedEnvelope(VisceptarEnvelope Envelope);
+
+public sealed class SentinelAlert
+{
+    public string AlertId { get; set; } = Guid.NewGuid().ToString("N");
+    public string EventId { get; set; } = "";
+    public string Disposition { get; set; } = "";
+    public int Score { get; set; }
+    public string Reason { get; set; } = "";
+    public DateTimeOffset CreatedUtc { get; set; } = DateTimeOffset.UtcNow;
+    public Dictionary<string, object?> Context { get; set; } = new();
+}
+
+public sealed class AuditEntry
+{
+    public long Sequence { get; set; }
+    public DateTimeOffset CreatedUtc { get; set; } = DateTimeOffset.UtcNow;
+    public string Action { get; set; } = "";
+    public string PayloadJson { get; set; } = "{}";
+    public string PrevHash { get; set; } = "";
+    public string Hash { get; set; } = "";
+}
+
+// ---------------------------
+// Stores
+// ---------------------------
+
+public sealed class AlertStore
+{
+    private readonly ConcurrentQueue<SentinelAlert> _items = new();
+    public IReadOnlyCollection<SentinelAlert> Items => _items.ToArray();
+
+    public void Add(SentinelAlert alert) => _items.Enqueue(alert);
+}
+
+public sealed class AuditLedger
+{
+    private readonly object _gate = new();
+    private readonly List<AuditEntry> _entries = new();
+    public IReadOnlyList<AuditEntry> Entries => _entries;
+
+    public AuditEntry Append(string action, IDictionary<string, object?> payload)
+    {
+        lock (_gate)
+        {
+            var json = System.Text.Json.JsonSerializer.Serialize(payload);
+            var prevHash = _entries.Count == 0 ? "GENESIS" : _entries[^1].Hash;
+            var sequence = _entries.Count + 1L;
+            var hashInput = $"{sequence}|{DateTimeOffset.UtcNow:O}|{action}|{prevHash}|{json}";
+            var hash = SentinelCrypto.Sha256Hex(hashInput);
+
+            var entry = new AuditEntry
+            {
+                Sequence = sequence,
+                CreatedUtc = DateTimeOffset.UtcNow,
+                Action = action,
+                PayloadJson = json,
+                PrevHash = prevHash,
+                Hash = hash
+            };
+
+            _entries.Add(entry);
+            return entry;
+        }
+    }
+}
+
+// ---------------------------
+// Policy Engine
+// ---------------------------
+
+public sealed class PolicyEngine
+{
+    public PolicyDecision Evaluate(OversightEvent evt)
+    {
+        var score = 0;
+        var reasons = new List<string>();
+
+        if (evt.Severity >= 8)
+        {
+            score += 60;
+            reasons.Add("critical_severity");
+        }
+        else if (evt.Severity >= 5)
+        {
+            score += 25;
+            reasons.Add("elevated_severity");
+        }
+
+        if (evt.Kind.Contains("auth", StringComparison.OrdinalIgnoreCase) &&
+            evt.Attributes.TryGetValue("failedCount", out var failedObj) &&
+            int.TryParse(Convert.ToString(failedObj), out var failedCount) &&
+            failedCount >= 5)
+        {
+            score += 30;
+            reasons.Add("auth_failure_burst");
+        }
+
+        if (evt.Tags.TryGetValue("integrity", out var integrity) &&
+            integrity.Equals("tamper", StringComparison.OrdinalIgnoreCase))
+        {
+            score += 35;
+            reasons.Add("tamper_signal");
+        }
+
+        if (evt.Tags.TryGetValue("network", out var networkTag) &&
+            networkTag.Equals("egress-anomaly", StringComparison.OrdinalIgnoreCase))
+        {
+            score += 20;
+            reasons.Add("egress_anomaly");
+        }
+
+        if (evt.Tags.TryGetValue("governance", out var gov) &&
+            gov.Equals("policy-breach", StringComparison.OrdinalIgnoreCase))
+        {
+            score += 40;
+            reasons.Add("policy_breach");
+        }
+
+        var disposition =
+            score >= 80 ? "escalate" :
+            score >= 45 ? "review" :
+            "observe";
+
+        return new PolicyDecision
+        {
+            Score = score,
+            Disposition = disposition,
+            Reasons = reasons
+        };
+    }
+}
+
+public sealed class PolicyDecision
+{
+    public int Score { get; set; }
+    public string Disposition { get; set; } = "observe";
+    public List<string> Reasons { get; set; } = new();
+}
+
+// ---------------------------
+// Worker
+// ---------------------------
+
+public sealed class EnvelopeProcessorWorker : BackgroundService
+{
+    private readonly Channel<QueuedEnvelope> _queue;
+    private readonly PolicyEngine _policy;
+    private readonly AlertStore _alerts;
+    private readonly AuditLedger _ledger;
+    private readonly ILogger<EnvelopeProcessorWorker> _logger;
+
+    public EnvelopeProcessorWorker(
+        Channel<QueuedEnvelope> queue,
+        PolicyEngine policy,
+        AlertStore alerts,
+        AuditLedger ledger,
+        ILogger<EnvelopeProcessorWorker> logger)
+    {
+        _queue = queue;
+        _policy = policy;
+        _alerts = alerts;
+        _ledger = ledger;
+        _logger = logger;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        await foreach (var queued in _queue.Reader.ReadAllAsync(stoppingToken))
+        {
+            var evt = queued.Envelope.Event;
+            var decision = _policy.Evaluate(evt);
+
+            _ledger.Append("event.process", new Dictionary<string, object?>
+            {
+                ["eventId"] = evt.EventId,
+                ["source"] = evt.Source,
+                ["kind"] = evt.Kind,
+                ["severity"] = evt.Severity,
+                ["score"] = decision.Score,
+                ["disposition"] = decision.Disposition,
+                ["reasons"] = decision.Reasons
+            });
+
+            if (decision.Disposition is "review" or "escalate")
+            {
+                var alert = new SentinelAlert
+                {
+                    EventId = evt.EventId,
+                    Score = decision.Score,
+                    Disposition = decision.Disposition,
+                    Reason = string.Join(",", decision.Reasons),
+                    Context = new Dictionary<string, object?>
+                    {
+                        ["source"] = evt.Source,
+                        ["kind"] = evt.Kind,
+                        ["summary"] = evt.Summary,
+                        ["severity"] = evt.Severity,
+                        ["receivedUtc"] = evt.ReceivedUtc,
+                        ["receivedBy"] = evt.ReceivedBy
+                    }
+                };
+
+                _alerts.Add(alert);
+
+                _ledger.Append("alert.raise", new Dictionary<string, object?>
+                {
+                    ["alertId"] = alert.AlertId,
+                    ["eventId"] = alert.EventId,
+                    ["score"] = alert.Score,
+                    ["disposition"] = alert.Disposition
+                });
+
+                _logger.LogWarning(
+                    "Alert raised for event {EventId} with disposition {Disposition} and score {Score}",
+                    alert.EventId, alert.Disposition, alert.Score);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Observed event {EventId} with score {Score}",
+                    evt.EventId, decision.Score);
+            }
+        }
+    }
+}
+
+// ---------------------------
+// Crypto helpers
+// ---------------------------
+
+public static class SentinelCrypto
+{
+    public static string Canonicalize(OversightEvent evt)
+    {
+        var parts = new[]
+        {
+            evt.EventId ?? "",
+            evt.Source ?? "",
+            evt.Kind ?? "",
+            evt.Severity.ToString(),
+            evt.Summary ?? "",
+            string.Join(";", evt.Tags.OrderBy(k => k.Key).Select(kv => $"{kv.Key}={kv.Value}")),
+            string.Join(";", evt.Attributes.OrderBy(k => k.Key).Select(kv => $"{kv.Key}={kv.Value}"))
+        };
+
+        return string.Join("|", parts);
+    }
+
+    public static string ComputeHmacBase64(string secret, string data)
+    {
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
+        var bytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(data));
+        return Convert.ToBase64String(bytes);
+    }
+
+    public static string Sha256Hex(string data)
+    {
+        using var sha = SHA256.Create();
+        var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(data));
+        return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
+    public static bool ConstantTimeEquals(string a, string b)
+    {
+        var ba = Encoding.UTF8.GetBytes(a ?? "");
+        var bb = Encoding.UTF8.GetBytes(b ?? "");
+        return ba.Length == bb.Length && CryptographicOperations.FixedTimeEquals(ba, bb);
+    }
+}
