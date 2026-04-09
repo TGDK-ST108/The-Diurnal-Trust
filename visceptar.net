@@ -1,0 +1,911 @@
+// Program.cs
+// .NET 8
+//
+// Safe purpose:
+// - oversight-network governance for agentic units
+// - masked intake and de-identification by default
+// - human review before retention
+// - node credential issuance / revocation / audit
+// - signed directives for agent units
+//
+// Run:
+//   dotnet new web -n JdoxVisceptar
+//   replace Program.cs with this file
+//   set VISCEPTAR_HMAC_KEY=change-me
+//   set VISCEPTAR_AES_KEY_BASE64=<32-byte-base64-key>
+//   dotnet run
+//
+// Notes:
+// - in-memory scaffold for demo/dev
+// - replace with PostgreSQL/SQL Server in production
+// - read endpoints are intentionally simple here; add JWT/API gateway in production
+
+using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+
+var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddSingleton<VisceptarCrypto>();
+builder.Services.AddSingleton<VisceptarEngine>();
+
+var app = builder.Build();
+
+app.MapGet("/", () => Results.Ok(new
+{
+    service = "JDOX AI NET",
+    protocol = "!VISCEPTAR/1.0",
+    mode = "oversight-network",
+    status = "ok"
+}));
+
+app.MapPost("/visceptar/nodes/register", (NodeRegistrationRequest req, VisceptarEngine engine) =>
+{
+    return Results.Ok(engine.RegisterNode(req));
+});
+
+app.MapPost("/visceptar/nodes/{nodeId}/revoke", (string nodeId, NodeAuthRequest req, VisceptarEngine engine) =>
+{
+    return Results.Ok(engine.RevokeNode(nodeId, req));
+});
+
+app.MapGet("/visceptar/network/nodes", (VisceptarEngine engine) =>
+{
+    return Results.Ok(engine.GetNodes());
+});
+
+app.MapPost("/visceptar/intake", (JdoxIntakeRequest req, VisceptarEngine engine) =>
+{
+    return Results.Ok(engine.Intake(req));
+});
+
+app.MapPost("/visceptar/cases/{caseId}/review/retain/{recordId}", (
+    string caseId,
+    string recordId,
+    ReviewRequest req,
+    VisceptarEngine engine) =>
+{
+    return Results.Ok(engine.Retain(caseId, recordId, req));
+});
+
+app.MapPost("/visceptar/cases/{caseId}/review/purge/{recordId}", (
+    string caseId,
+    string recordId,
+    ReviewRequest req,
+    VisceptarEngine engine) =>
+{
+    return Results.Ok(engine.Purge(caseId, recordId, req));
+});
+
+app.MapGet("/visceptar/cases/{caseId}", (string caseId, VisceptarEngine engine) =>
+{
+    return Results.Ok(engine.GetCase(caseId));
+});
+
+app.MapGet("/visceptar/audit/{caseId}", (string caseId, VisceptarEngine engine) =>
+{
+    return Results.Ok(engine.GetAudit(caseId));
+});
+
+app.MapPost("/visceptar/maintenance/purge-expired", (NodeAuthRequest req, VisceptarEngine engine) =>
+{
+    return Results.Ok(engine.PurgeExpired(req));
+});
+
+app.Run();
+
+public sealed class VisceptarEngine
+{
+    private readonly ConcurrentDictionary<string, JdoxCaseFile> _cases =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly ConcurrentDictionary<string, NodeRecord> _nodes =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly VisceptarCrypto _crypto;
+
+    public VisceptarEngine(VisceptarCrypto crypto)
+    {
+        _crypto = crypto;
+    }
+
+    public object RegisterNode(NodeRegistrationRequest req)
+    {
+        ValidateNodeRegistration(req);
+
+        var nodeId = Safe(req.NodeId, $"node.{Guid.NewGuid():N}");
+        if (_nodes.ContainsKey(nodeId))
+            throw new InvalidOperationException("node_already_exists");
+
+        var apiKey = Convert.ToHexString(RandomNumberGenerator.GetBytes(24));
+        var apiKeyHash = _crypto.HashApiKey(apiKey);
+
+        var node = new NodeRecord
+        {
+            NodeId = nodeId,
+            Role = req.Role,
+            Status = NodeStatus.Active,
+            RegisteredBy = Safe(req.Actor, "system"),
+            CreatedUtc = DateTimeOffset.UtcNow,
+            ApiKeyHash = apiKeyHash,
+            LastSeenUtc = null
+        };
+
+        _nodes[nodeId] = node;
+
+        return new
+        {
+            ok = true,
+            protocol = "!VISCEPTAR/1.0",
+            nodeId = node.NodeId,
+            role = node.Role.ToString(),
+            status = node.Status.ToString(),
+            createdUtc = node.CreatedUtc,
+            apiKey, // returned once
+            constraints = new
+            {
+                exportAllowed = false,
+                contactAllowed = false,
+                autonomousEscalationAllowed = false,
+                rawPiiReturnAllowed = false,
+                oversightOnly = true
+            }
+        };
+    }
+
+    public object RevokeNode(string nodeId, NodeAuthRequest req)
+    {
+        var admin = ValidateNode(req.NodeId, req.ApiKey, NodeRole.Admin);
+
+        if (!_nodes.TryGetValue(nodeId, out var target))
+            throw new InvalidOperationException("node_not_found");
+
+        target.Status = NodeStatus.Revoked;
+        target.RevokedUtc = DateTimeOffset.UtcNow;
+
+        return new
+        {
+            ok = true,
+            actorNodeId = admin.NodeId,
+            revokedNodeId = target.NodeId,
+            status = target.Status.ToString(),
+            revokedUtc = target.RevokedUtc
+        };
+    }
+
+    public object GetNodes()
+    {
+        var nodes = _nodes.Values
+            .OrderBy(x => x.NodeId)
+            .Select(x => new
+            {
+                x.NodeId,
+                role = x.Role.ToString(),
+                status = x.Status.ToString(),
+                x.RegisteredBy,
+                x.CreatedUtc,
+                x.LastSeenUtc,
+                x.RevokedUtc
+            });
+
+        return new
+        {
+            ok = true,
+            protocol = "!VISCEPTAR/1.0",
+            nodes
+        };
+    }
+
+    public object Intake(JdoxIntakeRequest req)
+    {
+        var node = ValidateNode(req.NodeId, req.ApiKey, NodeRole.OversightAgent, NodeRole.Reviewer, NodeRole.Admin);
+
+        if (req.Subject is null)
+            throw new ArgumentException("subject_required");
+        if (string.IsNullOrWhiteSpace(req.CaseId))
+            throw new ArgumentException("case_id_required");
+
+        var now = DateTimeOffset.UtcNow;
+        var caseFile = _cases.GetOrAdd(req.CaseId, id => new JdoxCaseFile
+        {
+            CaseId = id,
+            CreatedUtc = now
+        });
+
+        var relevance = ComputeRelevance(req.Relation, req.EvidenceScore, req.Tags);
+        var disposition = ComputeDisposition(req.Relation, req.EvidenceScore, relevance);
+        var policy = BuildPolicy(disposition);
+
+        var tokenId = _crypto.Tokenize(
+            req.Subject.FullName,
+            req.Subject.DateOfBirth ?? "",
+            req.Subject.Email ?? "",
+            req.Subject.Phone ?? ""
+        );
+
+        var record = new JdoxRecord
+        {
+            RecordId = $"rec_{Guid.NewGuid():N}",
+            CaseId = req.CaseId,
+            NodeId = node.NodeId,
+            TokenId = tokenId,
+            FullNameMasked = MaskName(req.Subject.FullName),
+            Relation = Safe(req.Relation, "unknown"),
+            EvidenceScore = Clamp01(req.EvidenceScore),
+            RelevanceScore = relevance,
+            Disposition = disposition,
+            CreatedUtc = now,
+            PurgeAtUtc = disposition == RecordDisposition.Excluded ? now.AddDays(30) : now.AddDays(180),
+            Justification = BuildJustification(disposition, relevance, req.EvidenceScore, req.Relation),
+            EncryptedSubjectJson = policy.EncryptPayload ? _crypto.EncryptJson(req.Subject) : null,
+            Tags = req.Tags ?? new Dictionary<string, string>()
+        };
+
+        caseFile.Records[record.RecordId] = record;
+
+        AddAudit(caseFile, new AuditEvent
+        {
+            EventId = $"aud_{Guid.NewGuid():N}",
+            CaseId = record.CaseId,
+            RecordId = record.RecordId,
+            NodeId = node.NodeId,
+            Action = "intake",
+            Actor = Safe(req.Actor, node.NodeId),
+            TimestampUtc = now,
+            Notes = record.Justification
+        });
+
+        var directive = BuildDirective(record, policy, "initial-policy-evaluation");
+
+        return new
+        {
+            ok = true,
+            caseId = record.CaseId,
+            recordId = record.RecordId,
+            tokenId = record.TokenId,
+            maskedName = record.FullNameMasked,
+            disposition = record.Disposition.ToString(),
+            relevanceScore = record.RelevanceScore,
+            purgeAtUtc = record.PurgeAtUtc,
+            directive
+        };
+    }
+
+    public object Retain(string caseId, string recordId, ReviewRequest req)
+    {
+        var node = ValidateNode(req.NodeId, req.ApiKey, NodeRole.Reviewer, NodeRole.Admin);
+        var record = RequireRecord(caseId, recordId);
+        var caseFile = _cases[caseId];
+
+        if (record.Disposition == RecordDisposition.Purged)
+            throw new InvalidOperationException("record_already_purged");
+
+        record.Disposition = RecordDisposition.Retained;
+        record.Reviewer = node.NodeId;
+        record.ReviewedUtc = DateTimeOffset.UtcNow;
+        record.PurgeAtUtc = DateTimeOffset.UtcNow.AddDays(365);
+        record.Justification = $"Retained after review: {Safe(req.Reason, "no reason provided")}";
+
+        AddAudit(caseFile, new AuditEvent
+        {
+            EventId = $"aud_{Guid.NewGuid():N}",
+            CaseId = caseId,
+            RecordId = recordId,
+            NodeId = node.NodeId,
+            Action = "retain",
+            Actor = Safe(req.Actor, node.NodeId),
+            TimestampUtc = DateTimeOffset.UtcNow,
+            Notes = record.Justification
+        });
+
+        var directive = BuildDirective(record, BuildPolicy(record.Disposition), "human-review-approved");
+
+        return new
+        {
+            ok = true,
+            caseId,
+            recordId,
+            disposition = record.Disposition.ToString(),
+            reviewedUtc = record.ReviewedUtc,
+            reviewer = record.Reviewer,
+            directive
+        };
+    }
+
+    public object Purge(string caseId, string recordId, ReviewRequest req)
+    {
+        var node = ValidateNode(req.NodeId, req.ApiKey, NodeRole.Reviewer, NodeRole.Admin);
+        var record = RequireRecord(caseId, recordId);
+        var caseFile = _cases[caseId];
+
+        record.Disposition = RecordDisposition.Purged;
+        record.Reviewer = node.NodeId;
+        record.ReviewedUtc = DateTimeOffset.UtcNow;
+        record.EncryptedSubjectJson = null;
+        record.Tags = new Dictionary<string, string>();
+        record.Justification = $"Purged: {Safe(req.Reason, "no reason provided")}";
+
+        AddAudit(caseFile, new AuditEvent
+        {
+            EventId = $"aud_{Guid.NewGuid():N}",
+            CaseId = caseId,
+            RecordId = recordId,
+            NodeId = node.NodeId,
+            Action = "purge",
+            Actor = Safe(req.Actor, node.NodeId),
+            TimestampUtc = DateTimeOffset.UtcNow,
+            Notes = record.Justification
+        });
+
+        var directive = BuildDirective(record, BuildPolicy(record.Disposition), "human-review-purge");
+
+        return new
+        {
+            ok = true,
+            caseId,
+            recordId,
+            disposition = record.Disposition.ToString(),
+            reviewedUtc = record.ReviewedUtc,
+            reviewer = record.Reviewer,
+            directive
+        };
+    }
+
+    public object PurgeExpired(NodeAuthRequest req)
+    {
+        var node = ValidateNode(req.NodeId, req.ApiKey, NodeRole.Admin);
+        var now = DateTimeOffset.UtcNow;
+        var touched = new List<object>();
+
+        foreach (var caseFile in _cases.Values)
+        {
+            foreach (var record in caseFile.Records.Values)
+            {
+                if (record.Disposition != RecordDisposition.Purged && record.PurgeAtUtc <= now)
+                {
+                    record.Disposition = RecordDisposition.Purged;
+                    record.EncryptedSubjectJson = null;
+                    record.Tags = new Dictionary<string, string>();
+                    record.ReviewedUtc = now;
+                    record.Reviewer = node.NodeId;
+                    record.Justification = "Auto-purged by retention policy.";
+
+                    AddAudit(caseFile, new AuditEvent
+                    {
+                        EventId = $"aud_{Guid.NewGuid():N}",
+                        CaseId = caseFile.CaseId,
+                        RecordId = record.RecordId,
+                        NodeId = node.NodeId,
+                        Action = "auto_purge",
+                        Actor = node.NodeId,
+                        TimestampUtc = now,
+                        Notes = "Retention window expired."
+                    });
+
+                    touched.Add(new
+                    {
+                        caseFile.CaseId,
+                        record.RecordId,
+                        disposition = record.Disposition.ToString()
+                    });
+                }
+            }
+        }
+
+        return new
+        {
+            ok = true,
+            actorNodeId = node.NodeId,
+            purgedCount = touched.Count,
+            records = touched
+        };
+    }
+
+    public object GetCase(string caseId)
+    {
+        if (!_cases.TryGetValue(caseId, out var caseFile))
+            throw new InvalidOperationException("case_not_found");
+
+        var records = caseFile.Records.Values
+            .OrderByDescending(x => x.CreatedUtc)
+            .Select(x => new
+            {
+                x.RecordId,
+                x.NodeId,
+                x.TokenId,
+                x.FullNameMasked,
+                x.Relation,
+                x.EvidenceScore,
+                x.RelevanceScore,
+                disposition = x.Disposition.ToString(),
+                x.CreatedUtc,
+                x.PurgeAtUtc,
+                x.ReviewedUtc,
+                x.Reviewer,
+                x.Justification,
+                x.Tags
+            });
+
+        return new
+        {
+            ok = true,
+            caseId = caseFile.CaseId,
+            caseFile.CreatedUtc,
+            counts = new
+            {
+                total = caseFile.Records.Count,
+                excluded = caseFile.Records.Values.Count(x => x.Disposition == RecordDisposition.Excluded),
+                pending = caseFile.Records.Values.Count(x => x.Disposition == RecordDisposition.PendingReview),
+                retained = caseFile.Records.Values.Count(x => x.Disposition == RecordDisposition.Retained),
+                purged = caseFile.Records.Values.Count(x => x.Disposition == RecordDisposition.Purged)
+            },
+            records
+        };
+    }
+
+    public object GetAudit(string caseId)
+    {
+        if (!_cases.TryGetValue(caseId, out var caseFile))
+            throw new InvalidOperationException("case_not_found");
+
+        return new
+        {
+            ok = true,
+            caseId,
+            events = caseFile.Audit
+                .OrderByDescending(x => x.TimestampUtc)
+                .Select(x => new
+                {
+                    x.EventId,
+                    x.RecordId,
+                    x.NodeId,
+                    x.Action,
+                    x.Actor,
+                    x.TimestampUtc,
+                    x.Notes
+                })
+        };
+    }
+
+    private NodeRecord ValidateNode(string nodeId, string apiKey, params NodeRole[] allowedRoles)
+    {
+        if (!_nodes.TryGetValue(Safe(nodeId, ""), out var node))
+            throw new InvalidOperationException("node_not_found");
+
+        if (node.Status != NodeStatus.Active)
+            throw new InvalidOperationException("node_not_active");
+
+        var presentedHash = _crypto.HashApiKey(apiKey);
+        if (!CryptographicOperations.FixedTimeEquals(
+                Convert.FromHexString(presentedHash),
+                Convert.FromHexString(node.ApiKeyHash)))
+            throw new InvalidOperationException("invalid_api_key");
+
+        if (allowedRoles.Length > 0 && !allowedRoles.Contains(node.Role))
+            throw new InvalidOperationException("role_not_allowed");
+
+        node.LastSeenUtc = DateTimeOffset.UtcNow;
+        return node;
+    }
+
+    private static void ValidateNodeRegistration(NodeRegistrationRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.NodeId))
+            throw new ArgumentException("node_id_required");
+    }
+
+    private JdoxRecord RequireRecord(string caseId, string recordId)
+    {
+        if (!_cases.TryGetValue(caseId, out var caseFile))
+            throw new InvalidOperationException("case_not_found");
+
+        if (!caseFile.Records.TryGetValue(recordId, out var record))
+            throw new InvalidOperationException("record_not_found");
+
+        return record;
+    }
+
+    private static void AddAudit(JdoxCaseFile caseFile, AuditEvent audit)
+    {
+        lock (caseFile.Audit)
+        {
+            caseFile.Audit.Add(audit);
+        }
+    }
+
+    private static double ComputeRelevance(string relation, double evidence, Dictionary<string, string>? tags)
+    {
+        var relationWeight = Safe(relation, "unknown").ToLowerInvariant() switch
+        {
+            "primary_subject" => 1.00,
+            "victim" => 0.95,
+            "direct_witness" => 0.85,
+            "investigator" => 0.70,
+            "associate" => 0.45,
+            "bystander" => 0.10,
+            "collateral" => 0.00,
+            _ => 0.05
+        };
+
+        var evidenceWeight = Clamp01(evidence);
+        var tagWeight = tags is { Count: > 0 } ? 0.05 : 0.0;
+
+        return Math.Round(Clamp01((relationWeight * 0.65) + (evidenceWeight * 0.30) + tagWeight), 4);
+    }
+
+    private static RecordDisposition ComputeDisposition(string relation, double evidence, double relevance)
+    {
+        var rel = Safe(relation, "unknown").ToLowerInvariant();
+        var lowRelation = rel is "bystander" or "collateral" or "unknown";
+
+        if (lowRelation || evidence < 0.50 || relevance < 0.55)
+            return RecordDisposition.Excluded;
+
+        return RecordDisposition.PendingReview;
+    }
+
+    private static string BuildJustification(RecordDisposition disposition, double relevance, double evidence, string relation)
+    {
+        return disposition switch
+        {
+            RecordDisposition.Excluded =>
+                $"Excluded by !VISCEPTAR default policy. relation={Safe(relation, "unknown")}, evidence={evidence:F2}, relevance={relevance:F2}",
+            RecordDisposition.PendingReview =>
+                $"Pending human review under !VISCEPTAR. relation={Safe(relation, "unknown")}, evidence={evidence:F2}, relevance={relevance:F2}",
+            RecordDisposition.Retained =>
+                "Retained after review.",
+            _ =>
+                "Purged."
+        };
+    }
+
+    private static PolicyProfile BuildPolicy(RecordDisposition disposition)
+    {
+        return disposition switch
+        {
+            RecordDisposition.Excluded => new PolicyProfile
+            {
+                MaskIdentifiers = true,
+                EncryptPayload = false,
+                ExportAllowed = false,
+                ContactAllowed = false,
+                AutonomousEscalationAllowed = false,
+                HumanReviewRequired = false,
+                RawPiiReturnAllowed = false
+            },
+            RecordDisposition.PendingReview => new PolicyProfile
+            {
+                MaskIdentifiers = true,
+                EncryptPayload = true,
+                ExportAllowed = false,
+                ContactAllowed = false,
+                AutonomousEscalationAllowed = false,
+                HumanReviewRequired = true,
+                RawPiiReturnAllowed = false
+            },
+            RecordDisposition.Retained => new PolicyProfile
+            {
+                MaskIdentifiers = true,
+                EncryptPayload = true,
+                ExportAllowed = false,
+                ContactAllowed = false,
+                AutonomousEscalationAllowed = false,
+                HumanReviewRequired = false,
+                RawPiiReturnAllowed = false
+            },
+            _ => new PolicyProfile
+            {
+                MaskIdentifiers = true,
+                EncryptPayload = false,
+                ExportAllowed = false,
+                ContactAllowed = false,
+                AutonomousEscalationAllowed = false,
+                HumanReviewRequired = false,
+                RawPiiReturnAllowed = false
+            }
+        };
+    }
+
+    private DirectiveEnvelope BuildDirective(JdoxRecord record, PolicyProfile policy, string rationale)
+    {
+        var action = record.Disposition switch
+        {
+            RecordDisposition.Excluded => DirectiveAction.ExcludeRecord,
+            RecordDisposition.PendingReview => DirectiveAction.QueueHumanReview,
+            RecordDisposition.Retained => DirectiveAction.RetainRecord,
+            _ => DirectiveAction.PurgeRecord
+        };
+
+        var constraints = new Dictionary<string, object>
+        {
+            ["program"] = "JDOX AI NET",
+            ["protocol"] = "!VISCEPTAR/1.0",
+            ["oversightOnly"] = true,
+            ["maskIdentifiers"] = policy.MaskIdentifiers,
+            ["exportAllowed"] = policy.ExportAllowed,
+            ["contactAllowed"] = policy.ContactAllowed,
+            ["autonomousEscalationAllowed"] = policy.AutonomousEscalationAllowed,
+            ["humanReviewRequired"] = policy.HumanReviewRequired,
+            ["rawPiiReturnAllowed"] = policy.RawPiiReturnAllowed,
+            ["deidentifyForObservers"] = true,
+            ["networkScope"] = "oversight-network"
+        };
+
+        if (record.Disposition == RecordDisposition.Excluded)
+            constraints["autoPurgeOn"] = record.PurgeAtUtc.ToString("O");
+
+        if (record.Disposition == RecordDisposition.Purged)
+            constraints["deleteSensitivePayload"] = true;
+
+        var envelope = new DirectiveEnvelope
+        {
+            EnvelopeId = $"env_{Guid.NewGuid():N}",
+            CreatedUtc = DateTimeOffset.UtcNow,
+            Program = "JDOX AI NET",
+            Protocol = "!VISCEPTAR/1.0",
+            CaseId = record.CaseId,
+            RecordId = record.RecordId,
+            NodeId = record.NodeId,
+            Action = action,
+            Rationale = rationale,
+            Constraints = constraints
+        };
+
+        envelope.SignatureHex = _crypto.SignObject(new
+        {
+            envelope.EnvelopeId,
+            envelope.CreatedUtc,
+            envelope.Program,
+            envelope.Protocol,
+            envelope.CaseId,
+            envelope.RecordId,
+            envelope.NodeId,
+            Action = envelope.Action.ToString(),
+            envelope.Rationale,
+            envelope.Constraints
+        });
+
+        return envelope;
+    }
+
+    private static string MaskName(string? fullName)
+    {
+        if (string.IsNullOrWhiteSpace(fullName))
+            return "REDACTED";
+
+        var parts = fullName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 1)
+            return $"{parts[0][0]}***";
+
+        return string.Join(" ", parts.Select((p, i) =>
+            i == parts.Length - 1 ? $"{p[0]}***" : p));
+    }
+
+    private static double Clamp01(double value) => Math.Clamp(value, 0.0, 1.0);
+
+    private static string Safe(string? value, string fallback)
+        => string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+}
+
+public sealed class VisceptarCrypto
+{
+    private readonly byte[] _hmacKey;
+    private readonly byte[] _aesKey;
+    private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
+
+    public VisceptarCrypto()
+    {
+        var hmacSeed = Environment.GetEnvironmentVariable("VISCEPTAR_HMAC_KEY");
+        _hmacKey = SHA256.HashData(Encoding.UTF8.GetBytes(
+            string.IsNullOrWhiteSpace(hmacSeed) ? "development-only-hmac-key" : hmacSeed));
+
+        var aesB64 = Environment.GetEnvironmentVariable("VISCEPTAR_AES_KEY_BASE64");
+        if (!string.IsNullOrWhiteSpace(aesB64))
+        {
+            var candidate = Convert.FromBase64String(aesB64);
+            _aesKey = candidate.Length == 32
+                ? candidate
+                : SHA256.HashData(candidate);
+        }
+        else
+        {
+            _aesKey = SHA256.HashData(Encoding.UTF8.GetBytes("development-only-aes-key"));
+        }
+    }
+
+    public string HashApiKey(string apiKey)
+    {
+        using var hmac = new HMACSHA256(_hmacKey);
+        return Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(apiKey ?? "")));
+    }
+
+    public string Tokenize(params string[] values)
+    {
+        var joined = string.Join("|", values.Select(v => (v ?? "").Trim().ToLowerInvariant()));
+        using var hmac = new HMACSHA256(_hmacKey);
+        return Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(joined)))[..24];
+    }
+
+    public string SignObject(object payload)
+    {
+        var json = JsonSerializer.Serialize(payload, _jsonOptions);
+        using var hmac = new HMACSHA256(_hmacKey);
+        return Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(json)));
+    }
+
+    public string EncryptJson<T>(T payload)
+    {
+        var plaintext = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload, _jsonOptions));
+        var nonce = RandomNumberGenerator.GetBytes(12);
+        var ciphertext = new byte[plaintext.Length];
+        var tag = new byte[16];
+
+        using var aes = new AesGcm(_aesKey, 16);
+        aes.Encrypt(nonce, plaintext, ciphertext, tag);
+
+        return JsonSerializer.Serialize(new EncryptedBlob
+        {
+            Nonce = Convert.ToBase64String(nonce),
+            Ciphertext = Convert.ToBase64String(ciphertext),
+            Tag = Convert.ToBase64String(tag)
+        }, _jsonOptions);
+    }
+}
+
+public sealed class JdoxCaseFile
+{
+    public string CaseId { get; set; } = "";
+    public DateTimeOffset CreatedUtc { get; set; }
+    public ConcurrentDictionary<string, JdoxRecord> Records { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public List<AuditEvent> Audit { get; } = new();
+}
+
+public sealed class JdoxRecord
+{
+    public string RecordId { get; set; } = "";
+    public string CaseId { get; set; } = "";
+    public string NodeId { get; set; } = "";
+    public string TokenId { get; set; } = "";
+    public string FullNameMasked { get; set; } = "";
+    public string Relation { get; set; } = "";
+    public double EvidenceScore { get; set; }
+    public double RelevanceScore { get; set; }
+    public RecordDisposition Disposition { get; set; }
+    public DateTimeOffset CreatedUtc { get; set; }
+    public DateTimeOffset PurgeAtUtc { get; set; }
+    public DateTimeOffset? ReviewedUtc { get; set; }
+    public string? Reviewer { get; set; }
+    public string Justification { get; set; } = "";
+    public string? EncryptedSubjectJson { get; set; }
+    public Dictionary<string, string> Tags { get; set; } = new();
+}
+
+public sealed class AuditEvent
+{
+    public string EventId { get; set; } = "";
+    public string CaseId { get; set; } = "";
+    public string RecordId { get; set; } = "";
+    public string NodeId { get; set; } = "";
+    public string Action { get; set; } = "";
+    public string Actor { get; set; } = "";
+    public DateTimeOffset TimestampUtc { get; set; }
+    public string Notes { get; set; } = "";
+}
+
+public sealed class DirectiveEnvelope
+{
+    public string EnvelopeId { get; set; } = "";
+    public DateTimeOffset CreatedUtc { get; set; }
+    public string Program { get; set; } = "";
+    public string Protocol { get; set; } = "";
+    public string CaseId { get; set; } = "";
+    public string RecordId { get; set; } = "";
+    public string NodeId { get; set; } = "";
+    public DirectiveAction Action { get; set; }
+    public string Rationale { get; set; } = "";
+    public Dictionary<string, object> Constraints { get; set; } = new();
+    public string SignatureHex { get; set; } = "";
+}
+
+public sealed class PolicyProfile
+{
+    public bool MaskIdentifiers { get; set; }
+    public bool EncryptPayload { get; set; }
+    public bool ExportAllowed { get; set; }
+    public bool ContactAllowed { get; set; }
+    public bool AutonomousEscalationAllowed { get; set; }
+    public bool HumanReviewRequired { get; set; }
+    public bool RawPiiReturnAllowed { get; set; }
+}
+
+public sealed class EncryptedBlob
+{
+    public string Nonce { get; set; } = "";
+    public string Ciphertext { get; set; } = "";
+    public string Tag { get; set; } = "";
+}
+
+public sealed class NodeRecord
+{
+    public string NodeId { get; set; } = "";
+    public NodeRole Role { get; set; }
+    public NodeStatus Status { get; set; }
+    public string RegisteredBy { get; set; } = "";
+    public DateTimeOffset CreatedUtc { get; set; }
+    public DateTimeOffset? LastSeenUtc { get; set; }
+    public DateTimeOffset? RevokedUtc { get; set; }
+    public string ApiKeyHash { get; set; } = "";
+}
+
+public sealed class NodeRegistrationRequest
+{
+    public string NodeId { get; set; } = "";
+    public NodeRole Role { get; set; } = NodeRole.OversightAgent;
+    public string Actor { get; set; } = "system";
+}
+
+public sealed class NodeAuthRequest
+{
+    public string NodeId { get; set; } = "";
+    public string ApiKey { get; set; } = "";
+    public string Actor { get; set; } = "system";
+}
+
+public sealed class JdoxIntakeRequest
+{
+    public string CaseId { get; set; } = "";
+    public string NodeId { get; set; } = "";
+    public string ApiKey { get; set; } = "";
+    public string Actor { get; set; } = "system";
+    public string Relation { get; set; } = "unknown";
+    public double EvidenceScore { get; set; }
+    public SubjectPayload? Subject { get; set; }
+    public Dictionary<string, string>? Tags { get; set; }
+}
+
+public sealed class ReviewRequest
+{
+    public string NodeId { get; set; } = "";
+    public string ApiKey { get; set; } = "";
+    public string Actor { get; set; } = "system";
+    public string Reason { get; set; } = "";
+}
+
+public sealed class SubjectPayload
+{
+    public string FullName { get; set; } = "";
+    public string? DateOfBirth { get; set; }
+    public string? Email { get; set; }
+    public string? Phone { get; set; }
+    public string? Notes { get; set; }
+}
+
+public enum RecordDisposition
+{
+    Excluded,
+    PendingReview,
+    Retained,
+    Purged
+}
+
+public enum DirectiveAction
+{
+    ExcludeRecord,
+    QueueHumanReview,
+    RetainRecord,
+    PurgeRecord
+}
+
+public enum NodeRole
+{
+    OversightAgent,
+    Reviewer,
+    Observer,
+    Admin
+}
+
+public enum NodeStatus
+{
+    Active,
+    Revoked
+}
