@@ -1,0 +1,530 @@
+// DzogchenEye.cs
+// .NET 8 compatible
+// Single-file scaffold for replacing a Mara-style module with DzogchenEye.
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Numerics;
+
+namespace TGDK.Protocols
+{
+    // ------------------------------------------------------------
+    // MARA-COMPATIBLE SURFACE
+    // ------------------------------------------------------------
+    public interface IMaraCompatibleModule
+    {
+        string ModuleName { get; }
+        string Version { get; }
+
+        void Initialize(ModuleConfig config);
+        CycleResult ExecuteCycle(EntropyInput input);
+        ModuleSnapshot GetSnapshot();
+        void Reset();
+    }
+
+    public sealed class ModuleConfig
+    {
+        public string InstanceId { get; set; } = Guid.NewGuid().ToString("N");
+        public float PmzInwardGain { get; set; } = 1.22f;
+        public float ReverseEntropyGain { get; set; } = 0.84f;
+        public float OuterRefractedGain { get; set; } = 1.48f;
+        public float SpiralCompression { get; set; } = 0.78f;
+        public float SpiralExpansion { get; set; } = 1.31f;
+        public int ShellBands { get; set; } = 12;
+        public int SpiralTurns { get; set; } = 16;
+        public float StabilityClampMin { get; set; } = 0.0f;
+        public float StabilityClampMax { get; set; } = 1.0f;
+        public bool EnableMaraCompatibilityRouting { get; set; } = true;
+    }
+
+    public sealed class EntropyInput
+    {
+        public DateTime TimestampUtc { get; set; } = DateTime.UtcNow;
+        public Vector2 SourceVector { get; set; } = new(1f, 0f);
+        public float RawEntropy { get; set; } = 0.5f;
+        public float ForceScalar { get; set; } = 1.0f;
+        public float PressureScalar { get; set; } = 0.5f;
+        public float DriftScalar { get; set; } = 0.25f;
+        public Dictionary<string, float> Channels { get; set; } = new();
+    }
+
+    public sealed class CycleResult
+    {
+        public float CoreEntropy { get; set; }
+        public float ReverseEntropy { get; set; }
+        public float RefractedOuterForce { get; set; }
+        public float StabilityIndex { get; set; }
+        public Vector2 EyeAxis { get; set; }
+        public IReadOnlyList<Vector2> SpiralPoints { get; set; } = Array.Empty<Vector2>();
+        public IReadOnlyList<Vector2> EyeContour { get; set; } = Array.Empty<Vector2>();
+        public IReadOnlyList<ShellBand> Shells { get; set; } = Array.Empty<ShellBand>();
+        public string Mode { get; set; } = "Dormant";
+    }
+
+    public sealed class ModuleSnapshot
+    {
+        public string ModuleName { get; set; } = "";
+        public string Version { get; set; } = "";
+        public string InstanceId { get; set; } = "";
+        public float LastCoreEntropy { get; set; }
+        public float LastReverseEntropy { get; set; }
+        public float LastRefractedOuterForce { get; set; }
+        public float LastStabilityIndex { get; set; }
+        public int CycleCount { get; set; }
+        public string CurrentMode { get; set; } = "Dormant";
+    }
+
+    public sealed class ShellBand
+    {
+        public int Index { get; set; }
+        public float Radius { get; set; }
+        public float BandForce { get; set; }
+        public float RefractionFactor { get; set; }
+        public Vector2 Direction { get; set; }
+    }
+
+    // ------------------------------------------------------------
+    // DZOGCHENEYE MODULE
+    // ------------------------------------------------------------
+    public sealed class DzogchenEyeModule : IMaraCompatibleModule
+    {
+        private ModuleConfig _config = new();
+        private int _cycleCount;
+        private float _lastCoreEntropy;
+        private float _lastReverseEntropy;
+        private float _lastRefractedOuterForce;
+        private float _lastStabilityIndex;
+        private string _currentMode = "Dormant";
+
+        public string ModuleName => "DzogchenEye";
+        public string Version => "1.0.0-net";
+
+        public void Initialize(ModuleConfig config)
+        {
+            _config = config ?? new ModuleConfig();
+            _cycleCount = 0;
+            _lastCoreEntropy = 0f;
+            _lastReverseEntropy = 0f;
+            _lastRefractedOuterForce = 0f;
+            _lastStabilityIndex = 0f;
+            _currentMode = "Initialized";
+        }
+
+        public CycleResult ExecuteCycle(EntropyInput input)
+        {
+            if (input == null) throw new ArgumentNullException(nameof(input));
+
+            _cycleCount++;
+
+            var axis = SafeNormalize(input.SourceVector);
+            var pmzCore = ComputePmzCore(input);
+            var reverseEntropy = ComputeReverseEntropy(pmzCore, input);
+            var outerForce = ComputeRefractedOuterForce(reverseEntropy, input);
+            var stability = ComputeStability(pmzCore, reverseEntropy, outerForce, input);
+
+            var spiral = GenerateSpiralGeometry(
+                center: Vector2.Zero,
+                axis: axis,
+                turns: _config.SpiralTurns,
+                compression: _config.SpiralCompression,
+                expansion: _config.SpiralExpansion,
+                seedEntropy: reverseEntropy);
+
+            var eyeContour = GenerateEyeContour(
+                center: Vector2.Zero,
+                axis: axis,
+                length: 2.8f + outerForce,
+                height: 1.2f + (pmzCore * 0.45f),
+                segments: 96);
+
+            var shells = GenerateShellBands(
+                axis,
+                outerForce,
+                reverseEntropy,
+                _config.ShellBands);
+
+            _lastCoreEntropy = pmzCore;
+            _lastReverseEntropy = reverseEntropy;
+            _lastRefractedOuterForce = outerForce;
+            _lastStabilityIndex = stability;
+            _currentMode = ResolveMode(stability, reverseEntropy, outerForce);
+
+            return new CycleResult
+            {
+                CoreEntropy = pmzCore,
+                ReverseEntropy = reverseEntropy,
+                RefractedOuterForce = outerForce,
+                StabilityIndex = stability,
+                EyeAxis = axis,
+                SpiralPoints = spiral,
+                EyeContour = eyeContour,
+                Shells = shells,
+                Mode = _currentMode
+            };
+        }
+
+        public ModuleSnapshot GetSnapshot()
+        {
+            return new ModuleSnapshot
+            {
+                ModuleName = ModuleName,
+                Version = Version,
+                InstanceId = _config.InstanceId,
+                LastCoreEntropy = _lastCoreEntropy,
+                LastReverseEntropy = _lastReverseEntropy,
+                LastRefractedOuterForce = _lastRefractedOuterForce,
+                LastStabilityIndex = _lastStabilityIndex,
+                CycleCount = _cycleCount,
+                CurrentMode = _currentMode
+            };
+        }
+
+        public void Reset()
+        {
+            _cycleCount = 0;
+            _lastCoreEntropy = 0f;
+            _lastReverseEntropy = 0f;
+            _lastRefractedOuterForce = 0f;
+            _lastStabilityIndex = 0f;
+            _currentMode = "Dormant";
+        }
+
+        // --------------------------------------------------------
+        // CORE MECHANICS
+        // --------------------------------------------------------
+        private float ComputePmzCore(EntropyInput input)
+        {
+            // PMZ inward bias: collapses entropy toward the center.
+            float channelMass = input.Channels.Count == 0 ? 0.25f : input.Channels.Values.Average();
+            float inwardPull =
+                (input.RawEntropy * 0.42f) +
+                (input.PressureScalar * 0.33f) +
+                (channelMass * 0.25f);
+
+            inwardPull *= _config.PmzInwardGain;
+            return Clamp01(inwardPull);
+        }
+
+        private float ComputeReverseEntropy(float pmzCore, EntropyInput input)
+        {
+            // Reverse entropy reduces drift and rotates disorder into controlled internal spiral.
+            float driftPenalty = input.DriftScalar * 0.41f;
+            float forceAssist = input.ForceScalar * 0.23f;
+            float reversed = (pmzCore + forceAssist - driftPenalty) * _config.ReverseEntropyGain;
+            return Clamp01(reversed);
+        }
+
+        private float ComputeRefractedOuterForce(float reverseEntropy, EntropyInput input)
+        {
+            // Outer shell expands force after the internal collapse has stabilized.
+            float outer =
+                (reverseEntropy * 0.58f) +
+                (input.ForceScalar * 0.32f) +
+                (input.PressureScalar * 0.10f);
+
+            outer *= _config.OuterRefractedGain;
+            return Clamp01(outer);
+        }
+
+        private float ComputeStability(float core, float reverse, float outer, EntropyInput input)
+        {
+            // Stability favors balanced inward core and outer release.
+            float centerBias = 1f - MathF.Abs(core - reverse);
+            float shellBias = 1f - MathF.Abs(reverse - outer);
+            float driftPenalty = input.DriftScalar * 0.45f;
+
+            float stability = ((centerBias * 0.52f) + (shellBias * 0.48f)) - driftPenalty;
+            return Clamp(stability, _config.StabilityClampMin, _config.StabilityClampMax);
+        }
+
+        private string ResolveMode(float stability, float reverseEntropy, float outerForce)
+        {
+            if (stability >= 0.85f && outerForce >= 0.70f) return "Expanded-Refracted";
+            if (stability >= 0.65f && reverseEntropy >= 0.55f) return "PMZ-Stable";
+            if (reverseEntropy >= 0.40f) return "Reverse-Entropy";
+            return "Dormant";
+        }
+
+        // --------------------------------------------------------
+        // GEOMETRY: EYE + SPIRAL + SHELLS
+        // --------------------------------------------------------
+        private static IReadOnlyList<Vector2> GenerateSpiralGeometry(
+            Vector2 center,
+            Vector2 axis,
+            int turns,
+            float compression,
+            float expansion,
+            float seedEntropy)
+        {
+            var pts = new List<Vector2>();
+            var angleOffset = MathF.Atan2(axis.Y, axis.X);
+
+            int samples = Math.Max(160, turns * 24);
+            float maxT = turns * MathF.PI * 2f;
+            float entropyScale = 0.25f + (seedEntropy * 0.75f);
+
+            for (int i = 0; i <= samples; i++)
+            {
+                float t = (i / (float)samples) * maxT;
+                float radius = (0.03f + compression * 0.015f * t) * expansion * entropyScale;
+                float x = center.X + radius * MathF.Cos(t + angleOffset);
+                float y = center.Y + radius * MathF.Sin(t + angleOffset);
+                pts.Add(new Vector2(x, y));
+            }
+
+            return pts;
+        }
+
+        private static IReadOnlyList<Vector2> GenerateEyeContour(
+            Vector2 center,
+            Vector2 axis,
+            float length,
+            float height,
+            int segments)
+        {
+            // Classic lens / eye contour.
+            var pts = new List<Vector2>();
+            Vector2 perp = new(-axis.Y, axis.X);
+
+            for (int i = 0; i <= segments; i++)
+            {
+                float t = i / (float)segments;
+                float x = Lerp(-length * 0.5f, length * 0.5f, t);
+                float normalized = (x / (length * 0.5f));
+                float y = height * (1f - normalized * normalized);
+
+                Vector2 top = center + axis * x + perp * y;
+                pts.Add(top);
+            }
+
+            for (int i = segments; i >= 0; i--)
+            {
+                float t = i / (float)segments;
+                float x = Lerp(-length * 0.5f, length * 0.5f, t);
+                float normalized = (x / (length * 0.5f));
+                float y = -height * (1f - normalized * normalized);
+
+                Vector2 bottom = center + axis * x + perp * y;
+                pts.Add(bottom);
+            }
+
+            return pts;
+        }
+
+        private static IReadOnlyList<ShellBand> GenerateShellBands(
+            Vector2 axis,
+            float outerForce,
+            float reverseEntropy,
+            int bands)
+        {
+            var list = new List<ShellBand>(bands);
+            Vector2 perp = new(-axis.Y, axis.X);
+
+            for (int i = 0; i < bands; i++)
+            {
+                float n = (i + 1f) / bands;
+                float refraction = 0.5f + (n * reverseEntropy);
+                float bandForce = outerForce * (0.7f + n * 0.6f);
+                float radius = 0.9f + (n * 1.75f * outerForce);
+
+                Vector2 direction = SafeNormalize(axis + (perp * (0.35f - n * 0.3f)));
+
+                list.Add(new ShellBand
+                {
+                    Index = i,
+                    Radius = radius,
+                    BandForce = bandForce,
+                    RefractionFactor = refraction,
+                    Direction = direction
+                });
+            }
+
+            return list;
+        }
+
+        // --------------------------------------------------------
+        // OPTIONAL COMPATIBILITY ROUTER
+        // --------------------------------------------------------
+        public MaraRoutedFrame RouteFromMaraFrame(MaraFrame legacyFrame)
+        {
+            if (!_config.EnableMaraCompatibilityRouting)
+                throw new InvalidOperationException("Mara compatibility routing is disabled.");
+
+            if (legacyFrame == null)
+                throw new ArgumentNullException(nameof(legacyFrame));
+
+            var input = new EntropyInput
+            {
+                TimestampUtc = legacyFrame.TimestampUtc,
+                SourceVector = legacyFrame.Axis,
+                RawEntropy = legacyFrame.EntropyLevel,
+                ForceScalar = legacyFrame.ForceLevel,
+                PressureScalar = legacyFrame.PressureLevel,
+                DriftScalar = legacyFrame.DriftLevel,
+                Channels = new Dictionary<string, float>(legacyFrame.Channels)
+            };
+
+            var result = ExecuteCycle(input);
+
+            return new MaraRoutedFrame
+            {
+                TimestampUtc = input.TimestampUtc,
+                Mode = result.Mode,
+                CoreEntropy = result.CoreEntropy,
+                ReverseEntropy = result.ReverseEntropy,
+                RefractedOuterForce = result.RefractedOuterForce,
+                StabilityIndex = result.StabilityIndex
+            };
+        }
+
+        // --------------------------------------------------------
+        // HELPERS
+        // --------------------------------------------------------
+        private static float Clamp01(float v) => Clamp(v, 0f, 1f);
+
+        private static float Clamp(float v, float min, float max)
+            => MathF.Min(max, MathF.Max(min, v));
+
+        private static float Lerp(float a, float b, float t)
+            => a + ((b - a) * t);
+
+        private static Vector2 SafeNormalize(Vector2 v)
+        {
+            if (v.LengthSquared() < 0.000001f) return new Vector2(1f, 0f);
+            return Vector2.Normalize(v);
+        }
+    }
+
+    // ------------------------------------------------------------
+    // LEGACY MARA COMPAT TYPES
+    // ------------------------------------------------------------
+    public sealed class MaraFrame
+    {
+        public DateTime TimestampUtc { get; set; } = DateTime.UtcNow;
+        public Vector2 Axis { get; set; } = new(1f, 0f);
+        public float EntropyLevel { get; set; } = 0.5f;
+        public float ForceLevel { get; set; } = 0.5f;
+        public float PressureLevel { get; set; } = 0.5f;
+        public float DriftLevel { get; set; } = 0.25f;
+        public Dictionary<string, float> Channels { get; set; } = new();
+    }
+
+    public sealed class MaraRoutedFrame
+    {
+        public DateTime TimestampUtc { get; set; }
+        public string Mode { get; set; } = "";
+        public float CoreEntropy { get; set; }
+        public float ReverseEntropy { get; set; }
+        public float RefractedOuterForce { get; set; }
+        public float StabilityIndex { get; set; }
+    }
+
+    // ------------------------------------------------------------
+    // OPTIONAL SVG EXPORTER FOR THE SYMBOL FORM
+    // ------------------------------------------------------------
+    public static class DzogchenEyeSvg
+    {
+        public static string Export(CycleResult result, int width = 1024, int height = 1024)
+        {
+            if (result == null) throw new ArgumentNullException(nameof(result));
+
+            string eyePath = PolylineToPath(result.EyeContour, width, height, 180f);
+            string spiralPath = PolylineToPath(result.SpiralPoints, width, height, 180f);
+
+            var shellPaths = result.Shells.Select(shell =>
+            {
+                Vector2 start = shell.Direction * shell.Radius;
+                Vector2 end = shell.Direction * (shell.Radius + 0.35f + shell.RefractionFactor * 0.25f);
+                return LinePath(start, end, width, height, 180f);
+            }).ToArray();
+
+            return $"""
+<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+  <rect width="100%" height="100%" fill="black"/>
+  <g stroke="#c99a35" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="{eyePath}" stroke-width="8"/>
+    <path d="{spiralPath}" stroke-width="5"/>
+    {string.Join(Environment.NewLine, shellPaths.Select(p => $"<path d=\"{p}\" stroke-width=\"2.2\" opacity=\"0.68\"/>"))}
+  </g>
+</svg>
+""";
+        }
+
+        private static string PolylineToPath(IReadOnlyList<Vector2> points, int w, int h, float scale)
+        {
+            if (points.Count == 0) return "";
+            var mapped = points.Select(p => Map(p, w, h, scale)).ToArray();
+            string head = $"M {mapped[0].X:F2} {mapped[0].Y:F2}";
+            string tail = string.Join(" ", mapped.Skip(1).Select(p => $"L {p.X:F2} {p.Y:F2}"));
+            return $"{head} {tail} Z";
+        }
+
+        private static string LinePath(Vector2 a, Vector2 b, int w, int h, float scale)
+        {
+            var p1 = Map(a, w, h, scale);
+            var p2 = Map(b, w, h, scale);
+            return $"M {p1.X:F2} {p1.Y:F2} L {p2.X:F2} {p2.Y:F2}";
+        }
+
+        private static Vector2 Map(Vector2 p, int w, int h, float scale)
+        {
+            float x = (w * 0.5f) + p.X * scale;
+            float y = (h * 0.5f) - p.Y * scale;
+            return new Vector2(x, y);
+        }
+    }
+
+    // ------------------------------------------------------------
+    // DEMO
+    // ------------------------------------------------------------
+    public static class Program
+    {
+        public static void Main()
+        {
+            var module = new DzogchenEyeModule();
+
+            module.Initialize(new ModuleConfig
+            {
+                PmzInwardGain = 1.18f,
+                ReverseEntropyGain = 0.91f,
+                OuterRefractedGain = 1.42f,
+                SpiralCompression = 0.82f,
+                SpiralExpansion = 1.28f,
+                ShellBands = 14,
+                SpiralTurns = 18
+            });
+
+            var result = module.ExecuteCycle(new EntropyInput
+            {
+                SourceVector = new Vector2(1f, 0.08f),
+                RawEntropy = 0.63f,
+                ForceScalar = 0.74f,
+                PressureScalar = 0.58f,
+                DriftScalar = 0.19f,
+                Channels = new Dictionary<string, float>
+                {
+                    ["pmz"] = 0.82f,
+                    ["reverse"] = 0.71f,
+                    ["outer"] = 0.77f
+                }
+            });
+
+            var snapshot = module.GetSnapshot();
+
+            Console.WriteLine($"Module       : {snapshot.ModuleName}");
+            Console.WriteLine($"Version      : {snapshot.Version}");
+            Console.WriteLine($"Mode         : {snapshot.CurrentMode}");
+            Console.WriteLine($"CoreEntropy  : {snapshot.LastCoreEntropy:F4}");
+            Console.WriteLine($"ReverseEnt   : {snapshot.LastReverseEntropy:F4}");
+            Console.WriteLine($"OuterForce   : {snapshot.LastRefractedOuterForce:F4}");
+            Console.WriteLine($"Stability    : {snapshot.LastStabilityIndex:F4}");
+            Console.WriteLine($"Cycles       : {snapshot.CycleCount}");
+
+            string svg = DzogchenEyeSvg.Export(result);
+            Console.WriteLine();
+            Console.WriteLine("SVG preview generated in-memory.");
+            Console.WriteLine(svg[..Math.Min(svg.Length, 700)]);
+        }
+    }
+}
