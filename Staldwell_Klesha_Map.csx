@@ -3,6 +3,65 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using System.Security.Cryptography;
+using System.Collections.Generic;
+
+public sealed class FealtyEnsoStatement
+{
+    public string Shape { get; set; } = "Enso shaped like a Trident";
+    public string Seal { get; set; } = "Onriyu paternaliser";
+    public string Motion { get; set; } = "a fling on grooves";
+    public string Blank { get; set; } = "reckon with";
+
+    public string Render()
+    {
+        return $"With Fealty in accordance to an {Shape}, sealed to an {Seal}, it presents itself as {Motion} that exists for others to {Blank}.";
+    }
+
+    // X × 5 / 22 - 1 / 4  =>  (10X - 11) / 44
+    public double Evaluate(double x)
+    {
+        return (x * 5.0 / 22.0) - 0.25;
+    }
+
+    public string EvaluateExact(double x)
+    {
+        return $"({10 * x:0.###} - 11) / 44";
+    }
+}
+
+public static class Program
+{
+    public static void Main()
+    {
+        var fills = new List<string>
+        {
+            "witness",
+            "reckon with",
+            "inherit",
+            "pass through",
+            "be measured by"
+        };
+
+        var phrase = new FealtyEnsoStatement();
+
+        Console.WriteLine("Variants:");
+        Console.WriteLine();
+
+        foreach (var fill in fills)
+        {
+            phrase.Blank = fill;
+            Console.WriteLine(phrase.Render());
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("Formula:");
+        double x = 5.0;
+        phrase.Blank = "reckon with";
+        Console.WriteLine($"X × 5 / 22 - 1 / 4, where X = {x}");
+        Console.WriteLine($"Decimal: {phrase.Evaluate(x):0.######}");
+        Console.WriteLine($"Exact form: {phrase.EvaluateExact(x)}");
+    }
+}
 
 namespace TGDK.SafeProfile
 {
@@ -13,6 +72,8 @@ namespace TGDK.SafeProfile
         Feminine,
         Androgynous
     }
+
+    
 
     public sealed class DandyRacoon
     {
