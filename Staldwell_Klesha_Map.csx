@@ -383,3 +383,257 @@ namespace TGDK.VowVirtuation
         }
     }
 }
+
+app.MapPost("/api/v1/staldwell/infrastructure/vow-virtuation/evaluate",
+    async (VowVirtuationRequest request, IPrimaryStaldwellInfrastructure infra, CancellationToken ct) =>
+    {
+        var validation = request.Validate();
+        if (validation.Count > 0)
+            return Results.ValidationProblem(validation);
+
+        return Results.Ok(await infra.EvaluateVowVirtuationAsync(request, ct));
+    });
+
+using System.Text.Json.Serialization;
+using TGDK.Staldwell.Infrastructure;
+using TGDK.VowVirtuation;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.ConfigureHttpJsonOptions(options =>
+{
+    options.SerializerOptions.WriteIndented = true;
+    options.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
+});
+
+builder.Services.AddSingleton<IPrimaryStaldwellInfrastructure, PrimaryStaldwellInfrastructure>();
+
+var app = builder.Build();
+
+app.MapGet("/health", () => Results.Ok(new
+{
+    ok = true,
+    service = "staldwell-primary-infrastructure",
+    utc = DateTimeOffset.UtcNow
+}));
+
+var staldwell = app.MapGroup("/api/v1/staldwell");
+staldwell.WithTags("Staldwell");
+
+staldwell.MapPost("/infrastructure/vow-virtuation/evaluate",
+    async (VowVirtuationRequest request, IPrimaryStaldwellInfrastructure infra, CancellationToken ct) =>
+    {
+        var validation = request.Validate();
+        if (validation.Count > 0)
+        {
+            return Results.ValidationProblem(validation);
+        }
+
+        var result = await infra.EvaluateVowVirtuationAsync(request, ct);
+        return Results.Ok(result);
+    })
+    .WithName("EvaluateVowVirtuation")
+    .WithSummary("Evaluates vow virtuation against primary Staldwell infrastructure.")
+    .WithDescription("Returns metScore, volume shift, exact redress pressure, overturn pressure, mirror-duo pressure, and nine-map outcomes.");
+
+staldwell.MapGet("/infrastructure/vow-virtuation/manifest",
+    (IPrimaryStaldwellInfrastructure infra) =>
+    {
+        return Results.Ok(infra.GetManifest());
+    })
+    .WithName("GetVowVirtuationManifest")
+    .WithSummary("Returns route manifest and protocol dimensions.");
+
+using TGDK.VowVirtuation;
+
+namespace TGDK.Staldwell.Infrastructure;
+
+public interface IPrimaryStaldwellInfrastructure
+{
+    Task<StaldwellVowVirtuationResponse> EvaluateVowVirtuationAsync(
+        VowVirtuationRequest request,
+        CancellationToken cancellationToken = default);
+
+    StaldwellManifest GetManifest();
+}
+
+public sealed class PrimaryStaldwellInfrastructure : IPrimaryStaldwellInfrastructure
+{
+    private readonly List<PrimaryVolumetric> _primaries;
+    private readonly List<SubtractionaryMix> _subtractionary;
+
+    public PrimaryStaldwellInfrastructure()
+    {
+        _primaries = VowVirtuationProtocol.BuildPrimaryVolumetrics();
+        _subtractionary = VowVirtuationProtocol.BuildSubtractionaryMixes(_primaries);
+    }
+
+    public Task<StaldwellVowVirtuationResponse> EvaluateVowVirtuationAsync(
+        VowVirtuationRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var result = VowVirtuationProtocol.Evaluate(
+            confidence: request.Confidence,
+            ratio: request.Ratio,
+            policyDifferential: request.PolicyDifferential,
+            toxicExchangeRatio: request.ToxicExchangeRatio
+        );
+
+        var envelope = new StaldwellVowVirtuationResponse
+        {
+            Ok = true,
+            TraceId = string.IsNullOrWhiteSpace(request.TraceId)
+                ? Guid.NewGuid().ToString("N")
+                : request.TraceId,
+            Mode = "vow_virtuation",
+            Context = new StaldwellContextSummary
+            {
+                CaseId = request.CaseId,
+                AssetId = request.AssetId,
+                NodeId = request.NodeId,
+                Source = request.Source,
+                SubmittedAtUtc = DateTimeOffset.UtcNow
+            },
+            Dimensions = new StaldwellDimensions
+            {
+                PrimaryCount = _primaries.Count,
+                SubtractionaryCount = _subtractionary.Count,
+                ReserveCount = VowVirtuationProtocol.TotalReserveBins,
+                TotalStateSpace = VowVirtuationProtocol.TotalStateSpace
+            },
+            Metrics = new StaldwellMetricBlock
+            {
+                MetScore = result.MetScore,
+                VolumeShift = result.VolumeShift,
+                ExactRedressPressure = result.ExactRedressPressure,
+                OverturnPressure = result.OverturnPressure,
+                MirrorDuoPressure = result.MirrorDuoPressure
+            },
+            NineMap = result.NineMap
+                .Select(x => new StaldwellOutcome
+                {
+                    Name = x.Name,
+                    Weight = x.Weight,
+                    Confidence = x.Confidence,
+                    PolicyDifferential = x.PolicyDifferential,
+                    Description = x.Description
+                })
+                .ToList()
+        };
+
+        return Task.FromResult(envelope);
+    }
+
+    public StaldwellManifest GetManifest()
+    {
+        return new StaldwellManifest
+        {
+            Service = "staldwell-primary-infrastructure",
+            Route = "/api/v1/staldwell/infrastructure/vow-virtuation/evaluate",
+            Dimensions = new StaldwellDimensions
+            {
+                PrimaryCount = _primaries.Count,
+                SubtractionaryCount = _subtractionary.Count,
+                ReserveCount = VowVirtuationProtocol.TotalReserveBins,
+                TotalStateSpace = VowVirtuationProtocol.TotalStateSpace
+            },
+            Roots = VowVirtuationProtocol.Roots,
+            PolicyMixes = VowVirtuationProtocol.PolicyMixes,
+            Channels = VowVirtuationProtocol.Channels
+        };
+    }
+}
+
+namespace TGDK.Staldwell.Infrastructure;
+
+public sealed class VowVirtuationRequest
+{
+    public string? TraceId { get; set; }
+    public string? CaseId { get; set; }
+    public string? AssetId { get; set; }
+    public string? NodeId { get; set; }
+    public string? Source { get; set; }
+
+    public double Confidence { get; set; }
+    public double Ratio { get; set; }
+    public double PolicyDifferential { get; set; }
+    public double ToxicExchangeRatio { get; set; }
+
+    public Dictionary<string, string[]> Validate()
+    {
+        var errors = new Dictionary<string, string[]>();
+
+        if (Confidence < 0 || Confidence > 1)
+            errors["confidence"] = new[] { "Confidence must be between 0 and 1." };
+
+        if (Ratio < 0 || Ratio > 1)
+            errors["ratio"] = new[] { "Ratio must be between 0 and 1." };
+
+        if (PolicyDifferential < 0 || PolicyDifferential > 1)
+            errors["policyDifferential"] = new[] { "PolicyDifferential must be between 0 and 1." };
+
+        if (ToxicExchangeRatio < 0 || ToxicExchangeRatio > 1)
+            errors["toxicExchangeRatio"] = new[] { "ToxicExchangeRatio must be between 0 and 1." };
+
+        return errors;
+    }
+}
+
+public sealed class StaldwellVowVirtuationResponse
+{
+    public bool Ok { get; set; }
+    public string TraceId { get; set; } = "";
+    public string Mode { get; set; } = "";
+    public StaldwellContextSummary Context { get; set; } = new();
+    public StaldwellDimensions Dimensions { get; set; } = new();
+    public StaldwellMetricBlock Metrics { get; set; } = new();
+    public List<StaldwellOutcome> NineMap { get; set; } = new();
+}
+
+public sealed class StaldwellContextSummary
+{
+    public string? CaseId { get; set; }
+    public string? AssetId { get; set; }
+    public string? NodeId { get; set; }
+    public string? Source { get; set; }
+    public DateTimeOffset SubmittedAtUtc { get; set; }
+}
+
+public sealed class StaldwellDimensions
+{
+    public int PrimaryCount { get; set; }
+    public int SubtractionaryCount { get; set; }
+    public int ReserveCount { get; set; }
+    public int TotalStateSpace { get; set; }
+}
+
+public sealed class StaldwellMetricBlock
+{
+    public double MetScore { get; set; }
+    public double VolumeShift { get; set; }
+    public double ExactRedressPressure { get; set; }
+    public double OverturnPressure { get; set; }
+    public double MirrorDuoPressure { get; set; }
+}
+
+public sealed class StaldwellOutcome
+{
+    public string Name { get; set; } = "";
+    public double Weight { get; set; }
+    public double Confidence { get; set; }
+    public double PolicyDifferential { get; set; }
+    public string Description { get; set; } = "";
+}
+
+public sealed class StaldwellManifest
+{
+    public string Service { get; set; } = "";
+    public string Route { get; set; } = "";
+    public StaldwellDimensions Dimensions { get; set; } = new();
+    public string[] Roots { get; set; } = Array.Empty<string>();
+    public string[] PolicyMixes { get; set; } = Array.Empty<string>();
+    public string[] Channels { get; set; } = Array.Empty<string
+
+app.Run();
