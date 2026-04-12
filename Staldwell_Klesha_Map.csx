@@ -2,6 +2,166 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using System.Security.Cryptography;
+
+namespace TGDK.SafeProfile
+{
+    public enum PresentationMode
+    {
+        Neutral,
+        Masculine,
+        Feminine,
+        Androgynous
+    }
+
+    public sealed class DandyRacoon
+    {
+        public string PublicAlias { get; private set; }
+        public PresentationMode Mode { get; private set; }
+        public double AuraRadiusFeet { get; private set; }
+        public int AuraAngleDegrees { get; private set; }
+        public bool BluetoothEnabled { get; private set; }
+        public DateTimeOffset LastRotationUtc { get; private set; }
+
+        private readonly byte[] _key;
+        private readonly Dictionary<string, string> _localProfile = new();
+
+        public DandyRacoon(
+            string publicAlias = "dandy_racoon",
+            PresentationMode mode = PresentationMode.Neutral,
+            double auraRadiusFeet = 110.2,
+            int auraAngleDegrees = 20,
+            bool bluetoothEnabled = true)
+        {
+            PublicAlias = SanitizeAlias(publicAlias);
+            Mode = mode;
+            AuraRadiusFeet = Math.Clamp(auraRadiusFeet, 1.0, 150.0);
+            AuraAngleDegrees = Math.Clamp(auraAngleDegrees, 1, 360);
+            BluetoothEnabled = bluetoothEnabled;
+            LastRotationUtc = DateTimeOffset.UtcNow;
+            _key = RandomNumberGenerator.GetBytes(32);
+        }
+
+        public void SetPresentationMode(PresentationMode mode)
+        {
+            Mode = mode;
+        }
+
+        public void SetAlias(string alias)
+        {
+            PublicAlias = SanitizeAlias(alias);
+        }
+
+        public void SetAura(double radiusFeet, int angleDegrees)
+        {
+            AuraRadiusFeet = Math.Clamp(radiusFeet, 1.0, 150.0);
+            AuraAngleDegrees = Math.Clamp(angleDegrees, 1, 360);
+        }
+
+        public void SetBluetooth(bool enabled)
+        {
+            BluetoothEnabled = enabled;
+        }
+
+        public string GetEphemeralBeaconId()
+        {
+            LastRotationUtc = DateTimeOffset.UtcNow;
+            string seed = $"{PublicAlias}|{Mode}|{LastRotationUtc:yyyyMMddHHmm}";
+            using var hmac = new HMACSHA256(_key);
+            byte[] hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(seed));
+            return Convert.ToHexString(hash)[..16].ToLowerInvariant();
+        }
+
+        public void SetProfileField(string key, string value)
+        {
+            if (string.IsNullOrWhiteSpace(key))
+                throw new ArgumentException("Key cannot be empty.", nameof(key));
+
+            _localProfile[key.Trim()] = value ?? string.Empty;
+        }
+
+        public string? GetProfileField(string key)
+        {
+            return _localProfile.TryGetValue(key, out var value) ? value : null;
+        }
+
+        public string ExportEncryptedProfile()
+        {
+            string json = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                PublicAlias,
+                Mode = Mode.ToString(),
+                AuraRadiusFeet,
+                AuraAngleDegrees,
+                BluetoothEnabled,
+                LastRotationUtc,
+                Profile = _localProfile
+            });
+
+            byte[] plaintext = Encoding.UTF8.GetBytes(json);
+            byte[] nonce = RandomNumberGenerator.GetBytes(12);
+            byte[] ciphertext = new byte[plaintext.Length];
+            byte[] tag = new byte[16];
+
+            using var aes = new AesGcm(_key, 16);
+            aes.Encrypt(nonce, plaintext, ciphertext, tag);
+
+            return Convert.ToBase64String(Combine(nonce, tag, ciphertext));
+        }
+
+        public string DescribeSafeState()
+        {
+            return $"alias={PublicAlias}, mode={Mode}, aura={AuraAngleDegrees}deg/{AuraRadiusFeet:F1}ft, bluetooth={(BluetoothEnabled ? "on" : "off")}";
+        }
+
+        private static string SanitizeAlias(string alias)
+        {
+            if (string.IsNullOrWhiteSpace(alias))
+                return "dandy_racoon";
+
+            alias = alias.Trim();
+            var sb = new StringBuilder();
+
+            foreach (char c in alias)
+            {
+                if (char.IsLetterOrDigit(c) || c == '_' || c == '-')
+                    sb.Append(c);
+            }
+
+            return sb.Length == 0 ? "dandy_racoon" : sb.ToString();
+        }
+
+        private static byte[] Combine(byte[] a, byte[] b, byte[] c)
+        {
+            byte[] output = new byte[a.Length + b.Length + c.Length];
+            Buffer.BlockCopy(a, 0, output, 0, a.Length);
+            Buffer.BlockCopy(b, 0, output, a.Length, b.Length);
+            Buffer.BlockCopy(c, 0, output, a.Length + b.Length, c.Length);
+            return output;
+        }
+    }
+
+    public static class Program
+    {
+        public static void Main()
+        {
+            var dandy = new DandyRacoon(
+                publicAlias: "dandy_racoon",
+                mode: PresentationMode.Androgynous,
+                auraRadiusFeet: 110.2,
+                auraAngleDegrees: 20,
+                bluetoothEnabled: true
+            );
+
+            dandy.SetProfileField("style", "stud");
+            dandy.SetProfileField("privacy_mode", "high");
+
+            Console.WriteLine(dandy.DescribeSafeState());
+            Console.WriteLine($"ephemeral_beacon={dandy.GetEphemeralBeaconId()}");
+            Console.WriteLine($"encrypted_profile={dandy.ExportEncryptedProfile()}");
+        }
+    }
+}
 
 namespace TGDK.VowVirtuation
 {
