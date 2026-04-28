@@ -1,0 +1,689 @@
+Yes — here is a clean, addable version of the scaffold as a proper Python package, with the broken parts corrected so it will actually run.
+
+What I fixed before wiring it in
+
+Your draft had a few issues that would break execution:
+
+SyntheticPathGenerator used time.time() but did not import time
+
+bridge_stage=0 would fail because the protocol only handled stages 1..7
+
+several imports should be package-relative
+
+animate_trajectory() had incorrect set_data() slicing
+
+RealmOverlay.check_realm_conditions() was too strict for early-stage execution
+
+the visualization and main runner needed better integration
+
+
+
+---
+
+Drop-in package structure
+
+quad_do_trajectory_scope/
+│
+├── __init__.py
+├── main.py
+├── requirements.txt
+│
+├── core/
+│   ├── __init__.py
+│   ├── trajectory_packet.py
+│   ├── bridge_protocol.py
+│   ├── realm_overlay.py
+│   ├── lattice_engine.py
+│   ├── centroid_gate.py
+│   └── qquap_seal.py
+│
+├── simulation/
+│   ├── __init__.py
+│   ├── synthetic_path_generator.py
+│   ├── lattice_collision_model.py
+│   └── confidence_model.py
+│
+├── visualization/
+│   ├── __init__.py
+│   ├── scope_renderer.py
+│   ├── quad_do_visualizer.py
+│   ├── lattice_renderer.py
+│   ├── realm_ring_renderer.py
+│   └── dev_status_panel.py
+│
+├── logging_utils/
+│   ├── __init__.py
+│   ├── trace_logger.py
+│   ├── error_catalog.py
+│   └── audit_exporter.py
+│
+└── tests/
+    ├── __init__.py
+    ├── bridge_stage_tests.py
+    ├── realm_overlay_tests.py
+    ├── centroid_gate_tests.py
+    └── regression_fixtures.py
+
+
+---
+
+1) requirements.txt
+
+numpy
+matplotlib
+
+
+---
+
+2) quad_do_trajectory_scope/__init__.py
+
+__all__ = [
+    "main",
+]
+
+
+---
+
+3) quad_do_trajectory_scope/core/__init__.py
+
+from .trajectory_packet import TrajectoryPacket
+from .bridge_protocol import BridgeProtocol
+from .realm_overlay import RealmOverlay
+from .lattice_engine import LatticeEngine, LatticeNode
+from .centroid_gate import CentroidGate
+from .qquap_seal import QQUApSeal
+
+
+---
+
+4) quad_do_trajectory_scope/core/trajectory_packet.py
+
+from dataclasses import dataclass, field
+from typing import Optional, Dict, List
+import hashlib
+import json
+import time
+
+
+@dataclass
+class TrajectoryPacket:
+    id: str
+    timestamp: float = field(default_factory=time.time)
+    source_frame: str = "simulation"
+    bridge_stage: int = 1
+    realm_state: Dict[str, float] = field(default_factory=dict)
+    vector_position: List[float] = field(default_factory=lambda: [0.0, 0.0])
+    vector_direction: List[float] = field(default_factory=lambda: [0.0, 0.0])
+    confidence: float = 0.5
+    lattice_node: Optional[str] = None
+    error_trace: Optional[str] = None
+    verification_hash: Optional[str] = None
+
+    def __post_init__(self):
+        self.verification_hash = self._generate_hash()
+
+    def _generate_hash(self) -> str:
+        payload = {
+            "id": self.id,
+            "timestamp": self.timestamp,
+            "stage": self.bridge_stage,
+            "realm_state": self.realm_state,
+            "vector_position": self.vector_position,
+            "vector_direction": self.vector_direction,
+            "confidence": self.confidence,
+            "lattice_node": self.lattice_node,
+            "error_trace": self.error_trace,
+        }
+        packet_str = json.dumps(payload, sort_keys=True).encode("utf-8")
+        return hashlib.sha256(packet_str).hexdigest()
+
+    def update_stage(self, stage: int, realm_state: Dict[str, float], confidence: float):
+        self.bridge_stage = stage
+        self.realm_state.update(realm_state)
+        self.confidence = confidence
+        self.verification_hash = self._generate_hash()
+
+    def advance_position(self, dt: float = 1.0):
+        self.vector_position = [
+            self.vector_position[0] + self.vector_direction[0] * dt,
+            self.vector_position[1] + self.vector_direction[1] * dt,
+        ]
+        self.verification_hash = self._generate_hash()
+
+
+---
+
+5) quad_do_trajectory_scope/core/bridge_protocol.py
+
+from typing import Optional
+from .trajectory_packet import TrajectoryPacket
+
+
+class BridgeProtocol:
+    def __init__(self):
+        self.stages = {
+            1: self._acquire,
+            2: self._align,
+            3: self._engage,
+            4: self._amplify,
+            5: self._refine,
+            6: self._constrict,
+            7: self._resolve,
+        }
+
+    def process_packet(self, packet: TrajectoryPacket) -> Optional[TrajectoryPacket]:
+        stage_handler = self.stages.get(packet.bridge_stage)
+        if not stage_handler:
+            packet.error_trace = f"Unknown bridge stage: {packet.bridge_stage}"
+            return None
+        return stage_handler(packet)
+
+    def _acquire(self, packet: TrajectoryPacket) -> TrajectoryPacket:
+        packet.update_stage(1, {"potential": 0.80}, 0.70)
+        return packet
+
+    def _align(self, packet: TrajectoryPacket) -> TrajectoryPacket:
+        packet.update_stage(2, {"alignment": 0.85}, 0.75)
+        return packet
+
+    def _engage(self, packet: TrajectoryPacket) -> TrajectoryPacket:
+        packet.update_stage(3, {"clarity": 0.90}, 0.80)
+        return packet
+
+    def _amplify(self, packet: TrajectoryPacket) -> TrajectoryPacket:
+        packet.update_stage(4, {"focus": 0.92, "precision": 0.88}, 0.85)
+        return packet
+
+    def _refine(self, packet: TrajectoryPacket) -> TrajectoryPacket:
+        packet.update_stage(5, {"precision": 0.95, "convergence": 0.90}, 0.90)
+        return packet
+
+    def _constrict(self, packet: TrajectoryPacket) -> TrajectoryPacket:
+        packet.update_stage(6, {"convergence": 0.98, "resolution": 0.95}, 0.95)
+        return packet
+
+    def _resolve(self, packet: TrajectoryPacket) -> TrajectoryPacket:
+        packet.update_stage(7, {"release": 0.99, "transcendence": 1.00}, 1.00)
+        return packet
+
+
+---
+
+6) quad_do_trajectory_scope/core/realm_overlay.py
+
+from typing import Dict
+
+
+class RealmOverlay:
+    def __init__(self):
+        self.realms = {
+            "potential": 0.0,
+            "alignment": 0.0,
+            "clarity": 0.0,
+            "focus": 0.0,
+            "precision": 0.0,
+            "convergence": 0.0,
+            "resolution": 0.0,
+            "release": 0.0,
+            "transcendence": 0.0,
+        }
+
+    def update_realms(self, realm_state: Dict[str, float]) -> None:
+        for realm, score in realm_state.items():
+            if realm in self.realms:
+                self.realms[realm] = score
+
+    def check_realm_conditions(self, threshold: float = 0.7) -> bool:
+        populated = [score for score in self.realms.values() if score > 0.0]
+        if not populated:
+            return False
+        return all(score >= threshold for score in populated)
+
+    def snapshot(self) -> Dict[str, float]:
+        return dict(self.realms)
+
+
+---
+
+7) quad_do_trajectory_scope/core/lattice_engine.py
+
+from typing import List, Dict, Optional
+import numpy as np
+
+
+class LatticeNode:
+    def __init__(self, node_id: str, position: List[float]):
+        self.node_id = node_id
+        self.position = position
+        self.collision_count = 0
+        self.confidence_delta = 0.0
+
+    def process_trajectory(self, trajectory_vector: List[float]) -> Optional[List[float]]:
+        self.collision_count += 1
+        self.confidence_delta += 0.05
+        return [v * 0.95 for v in trajectory_vector]
+
+
+class LatticeEngine:
+    def __init__(self):
+        self.nodes = self._initialize_lattice()
+
+    def _initialize_lattice(self) -> Dict[str, LatticeNode]:
+        nodes = {}
+        for i in range(24):
+            node_id = f"L{i}"
+            angle = i * (2 * np.pi / 24)
+            position = [float(np.cos(angle)), float(np.sin(angle))]
+            nodes[node_id] = LatticeNode(node_id, position)
+        return nodes
+
+    def process_through_lattice(self, trajectory_vector: List[float]) -> List[float]:
+        for node in self.nodes.values():
+            trajectory_vector = node.process_trajectory(trajectory_vector)
+        return trajectory_vector
+
+    def nearest_node(self, position: List[float]) -> str:
+        best_node = None
+        best_dist = float("inf")
+        px, py = position
+        for node_id, node in self.nodes.items():
+            dx = node.position[0] - px
+            dy = node.position[1] - py
+            dist = dx * dx + dy * dy
+            if dist < best_dist:
+                best_dist = dist
+                best_node = node_id
+        return best_node or "L0"
+
+
+---
+
+8) quad_do_trajectory_scope/core/centroid_gate.py
+
+from .trajectory_packet import TrajectoryPacket
+
+
+class CentroidGate:
+    def __init__(self, confidence_threshold: float = 0.95):
+        self.confidence_threshold = confidence_threshold
+        self.tail_gate_open = False
+
+    def check_centroid_conditions(self, packet: TrajectoryPacket) -> bool:
+        if packet.confidence >= self.confidence_threshold:
+            self.tail_gate_open = True
+            return True
+        self.tail_gate_open = False
+        return False
+
+
+---
+
+9) quad_do_trajectory_scope/core/qquap_seal.py
+
+import hashlib
+from .trajectory_packet import TrajectoryPacket
+
+
+class QQUApSeal:
+    @staticmethod
+    def seal_packet(packet: TrajectoryPacket) -> str:
+        seal_str = f"{packet.id}{packet.bridge_stage}{packet.verification_hash}".encode("utf-8")
+        return hashlib.sha256(seal_str).hexdigest()
+
+
+---
+
+10) quad_do_trajectory_scope/simulation/__init__.py
+
+from .synthetic_path_generator import SyntheticPathGenerator
+from .lattice_collision_model import LatticeCollisionModel
+from .confidence_model import ConfidenceModel
+
+
+---
+
+11) quad_do_trajectory_scope/simulation/synthetic_path_generator.py
+
+import random
+import time
+from ..core.trajectory_packet import TrajectoryPacket
+
+
+class SyntheticPathGenerator:
+    @staticmethod
+    def generate_path() -> TrajectoryPacket:
+        return TrajectoryPacket(
+            id=f"QDP-{random.randint(1000, 9999)}",
+            timestamp=time.time(),
+            source_frame="simulation",
+            bridge_stage=1,
+            realm_state={},
+            vector_position=[random.uniform(-1.0, 1.0), random.uniform(-1.0, 1.0)],
+            vector_direction=[random.uniform(-0.1, 0.1), random.uniform(-0.1, 0.1)],
+            confidence=0.5,
+            lattice_node=None,
+            error_trace=None,
+            verification_hash=None,
+        )
+
+
+---
+
+12) quad_do_trajectory_scope/simulation/lattice_collision_model.py
+
+from ..core.lattice_engine import LatticeEngine
+from ..core.trajectory_packet import TrajectoryPacket
+
+
+class LatticeCollisionModel:
+    def __init__(self):
+        self.lattice = LatticeEngine()
+
+    def simulate_collision(self, packet: TrajectoryPacket) -> TrajectoryPacket:
+        packet.vector_position = self.lattice.process_through_lattice(packet.vector_position)
+        packet.confidence = min(packet.confidence + 0.10, 1.0)
+        packet.lattice_node = self.lattice.nearest_node(packet.vector_position)
+        return packet
+
+
+---
+
+13) quad_do_trajectory_scope/simulation/confidence_model.py
+
+from ..core.trajectory_packet import TrajectoryPacket
+
+
+class ConfidenceModel:
+    @staticmethod
+    def apply(packet: TrajectoryPacket, stage_weight: float = 0.03) -> TrajectoryPacket:
+        packet.confidence = min(1.0, packet.confidence + stage_weight)
+        return packet
+
+
+---
+
+14) quad_do_trajectory_scope/logging_utils/__init__.py
+
+from .trace_logger import TraceLogger
+
+
+---
+
+15) quad_do_trajectory_scope/logging_utils/trace_logger.py
+
+import logging
+from ..core.trajectory_packet import TrajectoryPacket
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("quad_do")
+
+
+class TraceLogger:
+    @staticmethod
+    def log_packet(packet: TrajectoryPacket):
+        logger.info(
+            "Packet ID=%s | Stage=%s | Confidence=%.3f | Realm State=%s | Position=%s | LatticeNode=%s",
+            packet.id,
+            packet.bridge_stage,
+            packet.confidence,
+            packet.realm_state,
+            packet.vector_position,
+            packet.lattice_node,
+        )
+
+
+---
+
+16) quad_do_trajectory_scope/logging_utils/error_catalog.py
+
+ERRORS = {
+    "UNKNOWN_STAGE": "Unknown bridge stage encountered.",
+    "REALM_FAIL": "Realm condition threshold not met.",
+    "CENTROID_FAIL": "Centroid gate threshold not met.",
+}
+
+
+---
+
+17) quad_do_trajectory_scope/logging_utils/audit_exporter.py
+
+import json
+from pathlib import Path
+from ..core.trajectory_packet import TrajectoryPacket
+
+
+class AuditExporter:
+    @staticmethod
+    def export_packet(packet: TrajectoryPacket, output_path: str):
+        p = Path(output_path)
+        p.write_text(json.dumps({
+            "id": packet.id,
+            "timestamp": packet.timestamp,
+            "source_frame": packet.source_frame,
+            "bridge_stage": packet.bridge_stage,
+            "realm_state": packet.realm_state,
+            "vector_position": packet.vector_position,
+            "vector_direction": packet.vector_direction,
+            "confidence": packet.confidence,
+            "lattice_node": packet.lattice_node,
+            "error_trace": packet.error_trace,
+            "verification_hash": packet.verification_hash,
+        }, indent=2))
+
+
+---
+
+18) quad_do_trajectory_scope/visualization/__init__.py
+
+from .scope_renderer import ScopeRenderer
+from .quad_do_visualizer import QuadDoVisualizer
+
+
+---
+
+19) quad_do_trajectory_scope/visualization/scope_renderer.py
+
+import matplotlib.pyplot as plt
+from ..core.trajectory_packet import TrajectoryPacket
+
+
+class ScopeRenderer:
+    @staticmethod
+    def render_trajectory(packet: TrajectoryPacket):
+        plt.figure(figsize=(6, 6))
+        plt.scatter(packet.vector_position[0], packet.vector_position[1], label="Position")
+        plt.quiver(
+            packet.vector_position[0],
+            packet.vector_position[1],
+            packet.vector_direction[0],
+            packet.vector_direction[1],
+            angles="xy",
+            scale_units="xy",
+            scale=1,
+        )
+        plt.title(f"Trajectory at Stage {packet.bridge_stage}")
+        plt.xlabel("X Position")
+        plt.ylabel("Y Position")
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+
+
+---
+
+20) quad_do_trajectory_scope/visualization/dev_status_panel.py
+
+class DevStatusPanel:
+    def __init__(self):
+        self.lines = []
+
+    def update(self, line: str):
+        self.lines.append(line)
+
+    def render_text(self) -> str:
+        return "\n".join(self.lines[-10:])
+
+
+---
+
+21) quad_do_trajectory_scope/visualization/lattice_renderer.py
+
+import numpy as np
+
+
+def lattice_points(count: int = 24, radius: float = 0.4):
+    theta = np.linspace(0, 2 * np.pi, count, endpoint=False)
+    x = radius * np.cos(theta)
+    y = radius * np.sin(theta)
+    return x, y
+
+
+---
+
+22) quad_do_trajectory_scope/visualization/realm_ring_renderer.py
+
+import numpy as np
+
+
+def realm_ring_positions(count: int = 9, radius: float = 0.6, center=(0.0, -0.8)):
+    theta = np.linspace(0, 2 * np.pi, count, endpoint=False)
+    cx, cy = center
+    x = cx + radius * np.cos(theta)
+    y = cy + radius * np.sin(theta)
+    return x, y
+
+
+---
+
+23) quad_do_trajectory_scope/visualization/quad_do_visualizer.py
+
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.patches import Wedge, Circle
+import matplotlib.animation as animation
+from typing import List, Tuple
+
+from .dev_status_panel import DevStatusPanel
+from .lattice_renderer import lattice_points
+from .realm_ring_renderer import realm_ring_positions
+
+
+class QuadDoVisualizer:
+    def __init__(self):
+        self.fig, self.ax = plt.subplots(figsize=(12, 8))
+        self.ax.set_facecolor("#0a1a2a")
+        self.fig.patch.set_facecolor("#0a1a2a")
+        self.ax.set_xlim(-2, 2)
+        self.ax.set_ylim(-2, 2)
+        self.ax.set_aspect("equal")
+        self.ax.axis("off")
+
+        self.status_panel = DevStatusPanel()
+
+        self._draw_cone()
+        self._draw_forescope()
+        self._draw_tertiary_lattice()
+        self._draw_tightscope()
+        self._draw_centroid_tail_gate()
+        self._draw_9_realms_ring()
+        self._draw_bridge_nodes()
+        self._add_legend()
+
+        self.trace_text = self.ax.text(
+            1.05, -1.75,
+            "Developer Trace:\nWaiting for trajectory...",
+            color="white",
+            fontsize=8,
+            ha="left",
+            va="bottom"
+        )
+
+    def _draw_cone(self):
+        cone = Wedge((0, 2), 0.5, 180, 360, fc="none", ec="cyan", lw=1.5, alpha=0.7)
+        self.ax.add_patch(cone)
+        self.ax.text(0, 2.1, "Cone", color="cyan", ha="center", fontsize=10)
+
+    def _draw_forescope(self):
+        forescope = Circle((0, 1.2), 0.4, fc="none", ec="cyan", lw=1.5, alpha=0.7)
+        self.ax.add_patch(forescope)
+        self.ax.text(0, 1.6, "Forescope", color="cyan", ha="center", fontsize=10)
+
+    def _draw_tertiary_lattice(self):
+        x, y = lattice_points()
+        self.ax.plot(x, y, color="cyan", lw=1, alpha=0.5)
+
+        for i, (xi, yi) in enumerate(zip(x, y)):
+            self.ax.scatter(xi, yi, color="cyan", s=20, alpha=0.7)
+            self.ax.text(xi, yi, f"L{i}", color="white", ha="center", fontsize=6)
+
+    def _draw_tightscope(self):
+        tightscope = Circle((0, -0.4), 0.3, fc="none", ec="cyan", lw=1.5, alpha=0.7)
+        self.ax.add_patch(tightscope)
+        self.ax.text(0, -0.1, "Tightscope", color="cyan", ha="center", fontsize=10)
+
+    def _draw_centroid_tail_gate(self):
+        centroid = Circle((0, -1.2), 0.2, fc="magenta", ec="cyan", lw=1.5, alpha=0.8)
+        self.ax.add_patch(centroid)
+        self.ax.text(0, -1.45, "Centroid", color="white", ha="center", fontsize=10, fontweight="bold")
+
+        tail_gate_glow = Circle((0, -1.2), 0.25, fc="magenta", ec="none", alpha=0.3)
+        self.ax.add_patch(tail_gate_glow)
+        self.ax.text(0, -1.7, "Tail Gate", color="white", ha="center", fontsize=10)
+
+    def _draw_9_realms_ring(self):
+        realms = [
+            "Potential", "Alignment", "Clarity",
+            "Focus", "Precision", "Convergence",
+            "Resolution", "Release", "Transcendence"
+        ]
+
+        x, y = realm_ring_positions()
+
+        for i, (xi, yi, realm) in enumerate(zip(x, y, realms)):
+            self.ax.text(
+                xi, yi, realm,
+                color="cyan",
+                ha="center",
+                fontsize=7,
+                rotation=(360 / 9) * i - 90
+            )
+
+        ring = Circle((0, -0.8), 0.6, fc="none", ec="cyan", lw=0.8, alpha=0.5)
+        self.ax.add_patch(ring)
+
+    def _draw_bridge_nodes(self):
+        bridge_nodes = [
+            (0, 1.8, "1: Acquire"),
+            (0, 1.3, "2: Align"),
+            (0, 0.8, "3: Engage"),
+            (0.3, 0.2, "4: Amplify"),
+            (0, -0.2, "5: Refine"),
+            (0, -0.7, "6: Constrict"),
+            (0, -1.1, "7: Resolve"),
+        ]
+
+        for xi, yi, label in bridge_nodes:
+            self.ax.scatter(xi, yi, color="cyan", s=50, alpha=0.9)
+            self.ax.text(xi + 0.1, yi, label, color="white", ha="left", fontsize=8)
+
+        self.ax.scatter(0.3, 0.2, color="yellow", s=80, alpha=0.9)
+        self.ax.scatter(0, -1.1, color="yellow", s=80, alpha=0.9)
+
+    def _add_legend(self):
+        legend_elements = [
+            plt.Line2D([0], [0], color="cyan", lw=1.5, label="Lattice/Path"),
+            plt.Line2D([0], [0], marker="o", color="cyan", markersize=8, label="Bridge Node"),
+            plt.Line2D([0], [0], marker="o", color="yellow", markersize=8, label="Key Node (4, 7)"),
+            plt.Line2D([0], [0], marker="o", color="magenta", markersize=8, label="Centroid"),
+        ]
+        self.ax.legend(handles=legend_elements, loc="upper right", facecolor="#0a1a2a", labelcolor="white")
+
+    def update_trace(self, trace_message: str):
+        self.status_panel.update(trace_message)
+        self.trace_text.set_text(f"Developer Trace:\n{self.status_panel.render_text()}")
+
+    def animate_trajectory(self, trajectory_points: List[Tuple[float, float]]):
+        xs = [p[0] for p in trajectory_points]
+        ys = [p[1] for p in trajectory_points]
+
+        line, = self.ax.plot([], [], color="white", lw=1.5, alph
