@@ -12,7 +12,7 @@ Overview
 Core Capabilities 
 ![Alt Text](images/core.png)
 
-Ritual Properties 
+Properties 
 
 Quantum Collapse: The system collapses if directly observed. 
 
