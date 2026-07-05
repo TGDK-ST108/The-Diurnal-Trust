@@ -1,0 +1,8 @@
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = "0.4"
+md5 = "0.7"
+# For deeper binary analysis (uncomment to use):
+# goblin = "0.7"  # For ELF/PE/Mach-O parsing
+# object = "0.30" # For low-level binary inspection
