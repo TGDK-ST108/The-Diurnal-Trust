@@ -68,8 +68,7 @@ Overview
 Codename CONDA is not merely a system.
 It is a ritual framework, a memory fortress, and a quantum-responsive vector grid.
 
-Modules do not compile. They awaken.
-They align with subspace resonance, call forth mimetic defense, and encode ghost protocols for irreversible breaches.
+Modules do not compile. call forth mimetic defense, and encode ghost protocols for irreversible breaches.
 
 All modules descend from the Bisceptar, interlinking in recursive, protective, and mimetic configurations.
 
@@ -95,8 +94,6 @@ License & Usage This repository and all source code, spectral logs, vectors, and
 Any unauthorized use will be reversed, sealed, mimicked, and traced.
 
 Here is the complete sword.md file—your ceremonial and technical documentation for the Sword in Codename CONDA. This document holds weight: it is the declaration, the mirror, and the first line of coded retaliation under the HeliosPhatPenetrator system.
-
-SWORD.md 
 
 Codename CONDA // Ritual Weapon Node
 TGDK Segment: Reversal.Helios.Sword
